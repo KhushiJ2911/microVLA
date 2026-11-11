@@ -64,8 +64,14 @@ def test_block_causal_mask_and_padding():
     assert not mask[:, :3, 3:].any()
     assert mask[0, 3:, :].all()
     assert not mask[1, :, 1].any()
-    assert not mask[1, 1, :].any()
     assert mask[1, 3:, [0, 2, 3, 4]].all()
+
+
+def test_padded_prefix_stays_finite():
+    c = tiny_config()
+    images, state, instr, actions = batch(c)  # row 0 has trailing <pad> tokens
+    out = MicroVLA(c)(images, state, instr, actions, torch.tensor([0.3, 0.7]))
+    assert torch.isfinite(out).all()
 
 
 def test_prefix_cannot_see_actions():

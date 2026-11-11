@@ -314,6 +314,7 @@ def main() -> None:
     parser.add_argument("--eval-every", type=int, default=1000)
     parser.add_argument("--flow-steps", type=int, default=10)
     parser.add_argument("--runs", default="runs")
+    parser.add_argument("--logdir", default="runs/tb", help="TensorBoard log dir")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--overfit", action="store_true")
@@ -335,6 +336,24 @@ def main() -> None:
     model = MicroVLA(c).to(device).to(memory_format=torch.channels_last)
     print(json.dumps(parameter_counts(model)))
     data = sim.collect(args.episodes, c.horizon, args.noise, args.seed, device)
+    # Validation: unseen episodes (different seed), fixed noise and t so the curve is low-variance.
+    val = sim.collect(max(1, args.episodes // 10), c.horizon, args.noise, args.seed + 1, device)
+    vidx = torch.randperm(len(val["scene"]), device=device)[:1024]
+    val = {k: v[vidx] for k, v in val.items()}
+    val["noise"] = torch.randn_like(val["actions"])
+    val["t"] = torch.rand(len(vidx), device=device).pow(2 / 3) * 0.999 + 0.001
+    from torch.utils.tensorboard import SummaryWriter
+    writer = SummaryWriter(args.logdir)
+
+    @torch.no_grad()
+    def val_loss() -> float:
+        model.eval()
+        with autocast(device):
+            s = val["scene"]
+            loss = model.loss(sim.render(s), sim.robot_state(s), sim.encode_instruction(val["task"]),
+                              val["actions"], val["noise"], val["t"])
+        model.train()
+        return loss.item()
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     if args.compile:
         model.forward = torch.compile(model.forward)
@@ -353,6 +372,8 @@ def main() -> None:
                 row[name] = sim.evaluate(policy, args.eval_episodes, args.seed + 1, device, split=split, swap=swap)["success"]
         metrics.append(row)
         print(json.dumps(row))
+        for name in ("train", "heldout", "swap"):
+            writer.add_scalar(f"success/{name}", row[name], step)
         torch.save({"config": asdict(c), "model": model.state_dict(), "step": step}, runs / f"ckpt_{step}.pt")
         (runs / "metrics.json").write_text(json.dumps(metrics, indent=2))
         model.train()
@@ -383,9 +404,14 @@ def main() -> None:
             mean_loss = accumulated.item() / (100 if step % 100 == 0 else step % 100)
             elapsed = time.perf_counter() - start
             count = 100 if step % 100 == 0 else step % 100
-            row = {"step": step, "loss": mean_loss, "steps/s": count / elapsed, "samples/s": count * args.batch_size / elapsed,
-                   "peak_vram_mb": torch.cuda.max_memory_allocated() / 2**20 if device.type == "cuda" else None}
+            row = {"step": step, "loss": mean_loss, "val_loss": val_loss(), "lr": lr, "steps/s": count / elapsed,
+                   "samples/s": count * args.batch_size / elapsed,
+                   "peak_vram_mb": torch.cuda.max_memory_allocated() / 2**20 if device.type == "cuda" else 0.0}
             print(json.dumps(row))
+            for key, tag in (("loss", "loss/train"), ("val_loss", "loss/val"), ("lr", "opt/lr"),
+                             ("steps/s", "perf/steps_per_s"), ("samples/s", "perf/samples_per_s"),
+                             ("peak_vram_mb", "perf/peak_vram_mb")):
+                writer.add_scalar(tag, row[key], step)
             metrics.append(row)
             accumulated.zero_()
             start = time.perf_counter()
