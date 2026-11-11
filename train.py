@@ -343,7 +343,7 @@ def main() -> None:
     val["noise"] = torch.randn_like(val["actions"])
     val["t"] = torch.rand(len(vidx), device=device).pow(2 / 3) * 0.999 + 0.001
     from torch.utils.tensorboard import SummaryWriter
-    writer = SummaryWriter(args.logdir)
+    writer = SummaryWriter(args.logdir, flush_secs=10)
 
     @torch.no_grad()
     def val_loss() -> float:
