@@ -86,7 +86,7 @@ def attention_mask(prefix_valid: Tensor, horizon: int) -> Tensor:
     valid = F.pad(prefix_valid, (0, horizon), value=True)
     group = torch.arange(p + horizon, device=valid.device) >= p
     allowed = group[:, None] >= group[None, :]
-    return (allowed[None] & valid[:, None, :] & valid[:, :, None])[:, None]
+    return (allowed[None] & valid[:, None, :])[:, None]  # mask keys only: an all-False query row gives NaN
 
 
 def rope(x: Tensor, positions: Tensor) -> Tensor:
@@ -305,7 +305,8 @@ def demo(sim, args, device: torch.device) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--steps", type=int, default=5000)
-    parser.add_argument("--episodes", type=int, default=256)
+    parser.add_argument("--episodes", type=int, default=2000)
+    parser.add_argument("--noise", type=float, default=0.3, help="DART noise std on executed expert actions")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--seed", type=int, default=0)
@@ -333,9 +334,10 @@ def main() -> None:
     c = Config(vocab_size=len(sim.VOCAB), action_dim=sim.ACTION_DIM, state_dim=sim.STATE_DIM)
     model = MicroVLA(c).to(device).to(memory_format=torch.channels_last)
     print(json.dumps(parameter_counts(model)))
-    data = sim.collect(args.episodes, c.horizon, 0.0, args.seed, device)
+    data = sim.collect(args.episodes, c.horizon, args.noise, args.seed, device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-    velocity = torch.compile(model) if args.compile else model
+    if args.compile:
+        model.forward = torch.compile(model.forward)
     runs = Path(args.runs)
     runs.mkdir(parents=True, exist_ok=True)
     metrics = []
@@ -368,10 +370,7 @@ def main() -> None:
         actions = data["actions"][idx]
         opt.zero_grad(set_to_none=True)
         with autocast(device):
-            noise = fixed_noise if args.overfit else torch.randn_like(actions)
-            t = fixed_t if args.overfit else torch.rand(args.batch_size, device=device).pow(2 / 3) * 0.999 + 0.001
-            noisy = t[:, None, None] * noise + (1 - t[:, None, None]) * actions
-            loss = F.mse_loss(velocity(images, state, instr, noisy, t).float(), noise - actions)
+            loss = model.loss(images, state, instr, actions, *((fixed_noise, fixed_t) if args.overfit else ()))
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         warmup = min(100, max(1, args.steps // 10))
