@@ -302,7 +302,7 @@ def demo(sim, args, device: torch.device) -> None:
     sim.save_gif(torch.cat(clips, 1), "assets/language_swap.gif", labels=["original instruction", "swapped instruction"])
 
 
-def distill_vision(model: MicroVLA, sim, device: torch.device, steps: int, path: Path) -> None:
+def distill_vision(model: MicroVLA, sim, device: torch.device, steps: int, path: Path, writer) -> None:
     """Bootstrap the ViT from frozen SigLIP-B/16, as pi0.5 starts from a pretrained SigLIP.
 
     A from-scratch ViT fails to localize the small objects; matching SigLIP's patch features fixes that.
@@ -332,6 +332,8 @@ def distill_vision(model: MicroVLA, sim, device: torch.device, steps: int, path:
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
+        if step % 50 == 0:
+            writer.add_scalar("distill/loss", loss.item(), step)
         if step % 250 == 0:
             print(json.dumps({"distill_step": step, "distill_loss": loss.item()}), flush=True)
     torch.save(model.vision.state_dict(), path)
@@ -376,8 +378,10 @@ def main() -> None:
     print(json.dumps(parameter_counts(model)))
     runs = Path(args.runs)
     runs.mkdir(parents=True, exist_ok=True)
+    from torch.utils.tensorboard import SummaryWriter
+    writer = SummaryWriter(args.logdir, flush_secs=10)
     if args.distill_steps:
-        distill_vision(model, sim, device, args.distill_steps, runs / "vit_distilled.pt")
+        distill_vision(model, sim, device, args.distill_steps, runs / "vit_distilled.pt", writer)
     data = sim.collect(args.episodes, c.horizon, args.noise, args.seed, device)
     # Validation: unseen episodes (different seed), fixed noise and t so the curve is low-variance.
     val = sim.collect(max(1, args.episodes // 10), c.horizon, args.noise, args.seed + 1, device)
@@ -385,8 +389,6 @@ def main() -> None:
     val = {k: v[vidx] for k, v in val.items()}
     val["noise"] = torch.randn_like(val["actions"])
     val["t"] = torch.rand(len(vidx), device=device).pow(2 / 3) * 0.999 + 0.001
-    from torch.utils.tensorboard import SummaryWriter
-    writer = SummaryWriter(args.logdir, flush_secs=10)
 
     @torch.no_grad()
     def validate() -> tuple[float, float]:
@@ -401,13 +403,21 @@ def main() -> None:
         return loss.item(), F.cosine_similarity(moves, val["actions"][:, 0, :2]).mean().item()
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     metrics, first_step = [], 1
-    if args.resume and (ckpts := sorted(runs.glob("ckpt_*.pt"), key=lambda p: int(p.stem.split("_")[1]))):
-        ckpt = torch.load(ckpts[-1], map_location=device, weights_only=True)
+    if args.resume and (runs / "latest.pt").exists():
+        ckpt = torch.load(runs / "latest.pt", map_location=device, weights_only=True)
         model.load_state_dict(ckpt["model"])
         opt.load_state_dict(ckpt["opt"])
         first_step = ckpt["step"] + 1
-        metrics = json.loads((runs / "metrics.json").read_text())
-        print(f"resumed from {ckpts[-1]}")
+        metrics = [m for m in json.loads((runs / "metrics.json").read_text()) if m["step"] <= ckpt["step"]]
+        print(f"resumed from step {ckpt['step']}")
+
+    def save(step: int, path: Path) -> None:
+        state = {"config": asdict(c), "model": model.state_dict(), "opt": opt.state_dict(), "step": step}
+        torch.save(state, runs / "latest.tmp")
+        (runs / "latest.tmp").replace(runs / "latest.pt")  # atomic: a crash mid-write never corrupts latest.pt
+        if path.name != "latest.pt":
+            torch.save(state, path)
+        (runs / "metrics.json").write_text(json.dumps(metrics, indent=2))
     if args.compile:
         model.forward = torch.compile(model.forward)
     def checkpoint(step: int) -> None:
@@ -424,9 +434,7 @@ def main() -> None:
         print(json.dumps(row))
         for name in ("train", "heldout", "swap"):
             writer.add_scalar(f"success/{name}", row[name], step)
-        torch.save({"config": asdict(c), "model": model.state_dict(), "opt": opt.state_dict(), "step": step},
-                   runs / f"ckpt_{step}.pt")
-        (runs / "metrics.json").write_text(json.dumps(metrics, indent=2))
+        save(step, runs / f"ckpt_{step}.pt")
         model.train()
     fixed = torch.randint(len(data["scene"]), (args.batch_size,), device=device)
     fixed_noise = torch.randn(args.batch_size, c.horizon, c.action_dim, device=device)
@@ -472,6 +480,8 @@ def main() -> None:
             eval_start = time.perf_counter()
             checkpoint(step)
             start += time.perf_counter() - eval_start
+        elif step % 250 == 0:
+            save(step, runs / "latest.pt")
 
 
 if __name__ == "__main__":
