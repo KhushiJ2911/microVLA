@@ -302,15 +302,54 @@ def demo(sim, args, device: torch.device) -> None:
     sim.save_gif(torch.cat(clips, 1), "assets/language_swap.gif", labels=["original instruction", "swapped instruction"])
 
 
+def distill_vision(model: MicroVLA, sim, device: torch.device, steps: int, path: Path) -> None:
+    """Bootstrap the ViT from frozen SigLIP-B/16, as pi0.5 starts from a pretrained SigLIP.
+
+    A from-scratch ViT fails to localize the small objects; matching SigLIP's patch features fixes that.
+    The teacher sees the render upsampled to 128 px, which gives the same 8x8 patch grid as the student.
+    """
+    if path.exists():
+        model.vision.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+        return
+    from transformers import SiglipVisionModel
+    teacher = SiglipVisionModel.from_pretrained("google/siglip-base-patch16-224", torch_dtype=torch.bfloat16)
+    teacher = teacher.to(device).eval().requires_grad_(False)
+    head = nn.Linear(model.config.width, teacher.config.hidden_size).to(device)
+    params = [*model.vision.parameters(), *head.parameters()]
+    opt = torch.optim.AdamW(params, lr=1e-3, weight_decay=0.01)
+    scenes = sim.collect(4000, 1, 0.3, 1234, device)["scene"]
+    for step in range(1, steps + 1):
+        images = sim.render(scenes[torch.randint(len(scenes), (128,), device=device)])
+        with torch.no_grad():
+            x = F.interpolate(images.float() / 127.5 - 1, size=128, mode="nearest").bfloat16()
+            target = teacher(pixel_values=x, interpolate_pos_encoding=True).last_hidden_state.float()
+            target = F.layer_norm(target, target.shape[-1:])
+        for group in opt.param_groups:
+            group["lr"] = 1e-3 * min(step / 200, 1) * 0.5 * (1 + math.cos(math.pi * step / steps))
+        with autocast(device):
+            pred = head(model.vision(images)).float()
+        loss = (1 - F.cosine_similarity(pred, target, dim=-1)).mean() + F.mse_loss(pred, target)
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
+        if step % 250 == 0:
+            print(json.dumps({"distill_step": step, "distill_loss": loss.item()}), flush=True)
+    torch.save(model.vision.state_dict(), path)
+    del teacher, head, opt
+    torch.cuda.empty_cache()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--steps", type=int, default=5000)
-    parser.add_argument("--episodes", type=int, default=2000)
+    parser.add_argument("--episodes", type=int, default=4000)
     parser.add_argument("--noise", type=float, default=0.3, help="DART noise std on executed expert actions")
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--eval-episodes", type=int, default=32)
+    parser.add_argument("--distill-steps", type=int, default=3000, help="SigLIP->ViT distillation; 0 disables")
+    parser.add_argument("--resume", action="store_true", help="continue from the latest checkpoint in --runs")
+    parser.add_argument("--eval-episodes", type=int, default=64)
     parser.add_argument("--eval-every", type=int, default=1000)
     parser.add_argument("--flow-steps", type=int, default=10)
     parser.add_argument("--runs", default="runs")
@@ -335,6 +374,10 @@ def main() -> None:
     c = Config(vocab_size=len(sim.VOCAB), action_dim=sim.ACTION_DIM, state_dim=sim.STATE_DIM)
     model = MicroVLA(c).to(device).to(memory_format=torch.channels_last)
     print(json.dumps(parameter_counts(model)))
+    runs = Path(args.runs)
+    runs.mkdir(parents=True, exist_ok=True)
+    if args.distill_steps:
+        distill_vision(model, sim, device, args.distill_steps, runs / "vit_distilled.pt")
     data = sim.collect(args.episodes, c.horizon, args.noise, args.seed, device)
     # Validation: unseen episodes (different seed), fixed noise and t so the curve is low-variance.
     val = sim.collect(max(1, args.episodes // 10), c.horizon, args.noise, args.seed + 1, device)
@@ -346,20 +389,27 @@ def main() -> None:
     writer = SummaryWriter(args.logdir, flush_secs=10)
 
     @torch.no_grad()
-    def val_loss() -> float:
+    def validate() -> tuple[float, float]:
+        """Val flow loss, and cosine between sampled and expert first moves (learns long before success)."""
         model.eval()
-        with autocast(device):
-            s = val["scene"]
-            loss = model.loss(sim.render(s), sim.robot_state(s), sim.encode_instruction(val["task"]),
-                              val["actions"], val["noise"], val["t"])
+        s, obs = val["scene"], (sim.render(val["scene"]), sim.robot_state(val["scene"]), sim.encode_instruction(val["task"]))
+        with autocast(device), torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
+            loss = model.loss(*obs, val["actions"], val["noise"], val["t"])
+            torch.manual_seed(0)
+            moves = model.sample(*obs, args.flow_steps)[:, 0, :2].float()
         model.train()
-        return loss.item()
+        return loss.item(), F.cosine_similarity(moves, val["actions"][:, 0, :2]).mean().item()
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    metrics, first_step = [], 1
+    if args.resume and (ckpts := sorted(runs.glob("ckpt_*.pt"), key=lambda p: int(p.stem.split("_")[1]))):
+        ckpt = torch.load(ckpts[-1], map_location=device, weights_only=True)
+        model.load_state_dict(ckpt["model"])
+        opt.load_state_dict(ckpt["opt"])
+        first_step = ckpt["step"] + 1
+        metrics = json.loads((runs / "metrics.json").read_text())
+        print(f"resumed from {ckpts[-1]}")
     if args.compile:
         model.forward = torch.compile(model.forward)
-    runs = Path(args.runs)
-    runs.mkdir(parents=True, exist_ok=True)
-    metrics = []
     def checkpoint(step: int) -> None:
         model.eval()
         def policy(images, state, instr):
@@ -374,17 +424,19 @@ def main() -> None:
         print(json.dumps(row))
         for name in ("train", "heldout", "swap"):
             writer.add_scalar(f"success/{name}", row[name], step)
-        torch.save({"config": asdict(c), "model": model.state_dict(), "step": step}, runs / f"ckpt_{step}.pt")
+        torch.save({"config": asdict(c), "model": model.state_dict(), "opt": opt.state_dict(), "step": step},
+                   runs / f"ckpt_{step}.pt")
         (runs / "metrics.json").write_text(json.dumps(metrics, indent=2))
         model.train()
     fixed = torch.randint(len(data["scene"]), (args.batch_size,), device=device)
     fixed_noise = torch.randn(args.batch_size, c.horizon, c.action_dim, device=device)
     fixed_t = torch.rand(args.batch_size, device=device) * 0.998 + 0.001
-    checkpoint(0)
+    if first_step == 1:
+        checkpoint(0)
     start, accumulated = time.perf_counter(), torch.zeros((), device=device)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
-    for step in range(1, args.steps + 1):
+    for step in range(first_step, args.steps + 1):
         idx = fixed if args.overfit else torch.randint(len(data["scene"]), (args.batch_size,), device=device)
         scene = data["scene"][idx]
         images, state, instr = sim.render(scene), sim.robot_state(scene), sim.encode_instruction(data["task"][idx])
@@ -404,11 +456,12 @@ def main() -> None:
             mean_loss = accumulated.item() / (100 if step % 100 == 0 else step % 100)
             elapsed = time.perf_counter() - start
             count = 100 if step % 100 == 0 else step % 100
-            row = {"step": step, "loss": mean_loss, "val_loss": val_loss(), "lr": lr, "steps/s": count / elapsed,
-                   "samples/s": count * args.batch_size / elapsed,
+            vloss, vcos = validate()
+            row = {"step": step, "loss": mean_loss, "val_loss": vloss, "val_dir_cos": vcos, "lr": lr,
+                   "steps/s": count / elapsed, "samples/s": count * args.batch_size / elapsed,
                    "peak_vram_mb": torch.cuda.max_memory_allocated() / 2**20 if device.type == "cuda" else 0.0}
-            print(json.dumps(row))
-            for key, tag in (("loss", "loss/train"), ("val_loss", "loss/val"), ("lr", "opt/lr"),
+            print(json.dumps(row), flush=True)
+            for key, tag in (("loss", "loss/train"), ("val_loss", "loss/val"), ("val_dir_cos", "val/direction_cosine"), ("lr", "opt/lr"),
                              ("steps/s", "perf/steps_per_s"), ("samples/s", "perf/samples_per_s"),
                              ("peak_vram_mb", "perf/peak_vram_mb")):
                 writer.add_scalar(tag, row[key], step)
