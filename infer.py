@@ -1,11 +1,12 @@
-"""Real pi0.5 on 4 GiB: quantize the prefix, or stream it once per chunk.
+"""Real pi0.5 on 4 GiB: NF4 prefix or pinned-RAM prefix streaming via Accelerate.
+Offload retains action path/embeddings, reserves 700 MiB, fits SigLIP before Gemma.
+Construct on meta, omit vocabulary heads, then load one weight at a time.
 
-Offload keeps the action expert, action/time projections and language embeddings
-resident. Reserve 700 MiB for activations, KV and one streamed layer; fit whole
-SigLIP blocks first (used for each camera), then Gemma blocks. Other prefix
-weights live in pinned RAM; Accelerate stages each unit and releases it after
-forward. Unused vocabulary-output heads are omitted in both configurations.
-No fp32 model is allocated: construct on meta, then read one weight at a time.
+Trim removes only masked camera/text slots. SigLIP encodes cameras independently;
+prefix attention masks invalid keys and queries, and action attention masks
+the same prefix keys. Positions are cumsum(pad_mask)-1; action positions start at
+sum(prefix_pad_mask). Removing zero-mask slots preserves valid embeddings,
+positions and attention, hence actions mathematically (GPU rounding may differ).
 """
 import argparse
 from collections.abc import Callable
@@ -28,7 +29,8 @@ from torch import Tensor, nn
 POLICY = "lerobot/pi05_libero_finetuned_v044"
 REVISION = "7152f13e34c6c115d808aea0e5d08aca74eac14b"
 PREFIX = "model.paligemma_with_expert.paligemma.model"
-DEFAULT_CONFIGS = ["nf4", "offload-3.5", "offload-2.5", "steps-10", "steps-5", "steps-2"]
+DEFAULT_CONFIGS = ["nf4", "nf4+trim", "offload-3.5", "offload-2.5", "offload-2.5+trim",
+                   "steps-10", "steps-5", "steps-5+trim", "steps-2"]
 
 
 @dataclass
@@ -72,12 +74,15 @@ def load_frames(count: int = 8) -> list[Frame]:
     return frames
 
 
-def empty_policy(path: Path) -> nn.Module:
+def empty_policy(path: Path, trim: bool = False) -> nn.Module:
     """Meta initialization also avoids LeRobot's eager fp32 vision allocation."""
     from accelerate import init_empty_weights
     from lerobot.policies.pi05.configuration_pi05 import PI05Config
     from lerobot.policies.pi05.modeling_pi05 import PI05Policy
     config = PI05Config.from_pretrained(path)
+    if trim:
+        config.empty_cameras, config.tokenizer_max_length = 0, 64
+        config.input_features.pop("observation.images.empty_camera_0")
     config.device, config.compile_model, config.gradient_checkpointing = "meta", False, False
     with init_empty_weights():
         policy = PI05Policy(config)
@@ -130,9 +135,11 @@ def weight_sources(policy: nn.Module, keys: list[str]) -> dict[str, str]:
     return sources
 
 
-def load_policy(config: str = "nf4") -> tuple[nn.Module, Callable, Callable, dict]:
+def load_policy(config: str = "nf4", trim: bool = False) -> tuple[nn.Module, Callable, Callable, dict]:
     from accelerate import cpu_offload
     from safetensors import safe_open
+    trim = trim or config.endswith("+trim")
+    config = config.removesuffix("+trim")
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable; GPU inference was not run")
     budget = float(config.removeprefix("offload-")) if config.startswith("offload-") else None
@@ -142,7 +149,7 @@ def load_policy(config: str = "nf4") -> tuple[nn.Module, Callable, Callable, dic
                                                if budget else 1.)
     torch.cuda.reset_peak_memory_stats()
     path = checkpoint()
-    policy = empty_policy(path)
+    policy = empty_policy(path, trim)
     units, resident = placement(policy, budget) if budget else ([], set())
     offloaded = [n for n, _ in units if n not in resident]
     if config == "nf4":
@@ -155,12 +162,11 @@ def load_policy(config: str = "nf4") -> tuple[nn.Module, Callable, Callable, dic
                 parent, attr = name.rsplit(".", 1)
                 setattr(policy.get_submodule(parent), attr, quant)
     with safe_open(path / "model.safetensors", framework="pt") as weights:
-        expected = dict(policy.named_parameters())
         sources = weight_sources(policy, list(weights.keys()))
         unused = set(weights.keys()) - set(sources.values())
         if any(not n.endswith("lm_head.weight") for n in unused):
             raise ValueError(f"unexpected checkpoint keys: {unused}")
-        for name, param in expected.items():
+        for name, param in policy.named_parameters():
             value = weights.get_tensor(sources[name])
             if value.shape != param.shape:
                 raise ValueError(f"checkpoint shape mismatch: {name}")
@@ -182,7 +188,10 @@ def load_policy(config: str = "nf4") -> tuple[nn.Module, Callable, Callable, dic
             cpu_offload(module, execution_device=torch.device("cuda"), state_dict=module.state_dict(),
                         preload_module_classes=[type(module).__name__])
     pre, post = processors(policy, path)
-    info = {"offloaded_units": offloaded, "resident_prefix_units": sorted(resident),
+    vision = policy.model.paligemma_with_expert.paligemma.config.vision_config
+    info = {"trim": trim, "prefix_tokens": {"images": len(policy.config.image_features) * (vision.image_size // vision.patch_size)**2,
+                                          "text": policy.config.tokenizer_max_length},
+            "offloaded_units": offloaded, "resident_prefix_units": sorted(resident),
             "resident_weight_gib": sum(p.numel() * p.element_size() for p in policy.parameters()
                                        if p.device.type == "cuda") / 2**30, "budget_gib": budget}
     return policy, pre, post, info
@@ -191,10 +200,23 @@ def load_policy(config: str = "nf4") -> tuple[nn.Module, Callable, Callable, dic
 def processors(policy: nn.Module, path: Path, device: str = "cuda") -> tuple[Callable, Callable]:
     from huggingface_hub import hf_hub_download
     from lerobot.policies.factory import make_pre_post_processors
+    from lerobot.processor import TokenizerProcessorStep
     # A local tokenizer directory avoids AutoTokenizer fetching an uncached model config.
     tokenizer = Path(hf_hub_download("google/paligemma-3b-pt-224", "tokenizer_config.json", local_files_only=True)).parent
-    return make_pre_post_processors(policy.config, pretrained_path=path, preprocessor_overrides={
-        "device_processor": {"device": device}, "tokenizer_processor": {"tokenizer_name": str(tokenizer)}})
+    trimmed = policy.config.tokenizer_max_length == 64
+    pre, post = make_pre_post_processors(policy.config, pretrained_path=path, preprocessor_overrides={
+        "device_processor": {"device": device}, "tokenizer_processor": {"tokenizer_name": str(tokenizer),
+        "max_length": policy.config.tokenizer_max_length, "padding": "max_length", "truncation": not trimmed}})
+    if trimmed:
+        def check_prompt(index, transition):
+            step = pre.steps[index]
+            if isinstance(step, TokenizerProcessorStep):
+                for prompt in step.get_task(transition):
+                    length = len(step.input_tokenizer(prompt, truncation=False, padding=False)["input_ids"])
+                    if length > 64:
+                        raise ValueError(f"Prompt for {prompt!r} has {length} tokens; trim limit is 64")
+        pre.before_step_hooks.append(check_prompt)
+    return pre, post
 
 
 @torch.inference_mode()
@@ -233,9 +255,9 @@ def predict(policy: nn.Module, pre: Callable, post: Callable, frame: Frame, step
                      "peak_reserved_gib": torch.cuda.max_memory_reserved() / 2**30}
 
 
-def run_config(config: str, steps: int, count: int, timed: bool = True) -> dict:
+def run_config(config: str, steps: int, count: int, timed: bool = True, trim: bool = False) -> dict:
     frames = load_frames(count)
-    policy, pre, post, info = load_policy(config)
+    policy, pre, post, info = load_policy(config, trim)
     for _ in range(2 if timed else 0):
         predict(policy, pre, post, frames[0], steps)
     actions, samples = [], []
@@ -264,6 +286,8 @@ def deviation(actions: list, reference: list) -> dict[str, float]:
 def benchmark(configs: list[str], count: int = 8) -> dict:
     """Isolate allocator budgets and failed CUDA contexts in fresh processes."""
     results = {}
+    configs = list(dict.fromkeys(c for label in configs for c in
+                                 ([label.removesuffix("+trim"), label] if label.endswith("+trim") else [label])))
     bases = list(dict.fromkeys([c for c in configs if not c.startswith("steps-")]
                               + (["nf4", "offload-3.5", "offload-2.5"] if any(c.startswith("steps-") for c in configs) else [])))
     def execute(label, base, steps):
@@ -275,23 +299,29 @@ def benchmark(configs: list[str], count: int = 8) -> dict:
         print(label, results[label].get("latency_p50_ms", results[label].get("error")), flush=True)
     for base in bases:
         execute(base, base, 10)
-    successes = [c for c in bases if results[c]["status"] == "ok"]
+    successes = [c for c in bases if results[c]["status"] == "ok" and not c.endswith("+trim")]
     best = min(successes, key=lambda c: results[c]["latency_p50_ms"]) if successes else None
     reference = max(successes, key=lambda c: (c.startswith("offload-"), results[c]["resident_weight_gib"])) if successes else None
     for label in configs:
         if label.startswith("steps-"):
-            k = int(label.removeprefix("steps-"))
-            if best and k == 10:
-                results[label] = dict(results[best])
+            k = int(label.removeprefix("steps-").removesuffix("+trim"))
+            base = best + ("+trim" if label.endswith("+trim") else "") if best else None
+            if base in results and k == 10:
+                results[label] = dict(results[base])
             elif best:
-                execute(label, best, k)
+                execute(label, base, k)
             else:
                 results[label] = {"status": "failed", "error": "no successful placement for flow-step sweep"}
     for label, row in results.items():
         if row["status"] == "ok":
-            row["vs_reference"] = deviation(row["actions"], results[reference]["actions"])
+            if reference:
+                row["vs_reference"] = deviation(row["actions"], results[reference]["actions"])
             if label.startswith("steps-"):
                 row["vs_10_steps"] = deviation(row["actions"], results[best]["actions"])
+            if label.endswith("+trim"):
+                counterpart = results[label.removesuffix("+trim")]
+                row["vs_untrimmed"] = (deviation(row["actions"], counterpart["actions"]) if counterpart["status"] == "ok"
+                                       else {"error": "untrimmed counterpart failed"})
     for row in results.values():
         row.pop("actions", None)
     report = {"policy": POLICY, "revision": REVISION, "units": "GiB, ms; actions in dataset units",
@@ -303,12 +333,12 @@ def benchmark(configs: list[str], count: int = 8) -> dict:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(10, 5))
     for label, row in results.items():
         if row["status"] == "ok":
             x, y = row["peak_allocated_gib"], row["latency_p50_ms"]
-            ax.scatter(x, y)
-            ax.annotate(label, (x, y), xytext=(5, -14 if label.startswith("steps-") else 5), textcoords="offset points")
+            ax.scatter(x, y, marker="X" if row["trim"] else "o", s=65, label=label)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", title="Trim: X; original: circle")
     failures = [c for c, r in results.items() if r["status"] != "ok"]
     ax.set(xlabel="Peak allocated VRAM (GiB)", ylabel="Chunk latency p50 (ms)", title=f"pi0.5 LIBERO — reference: {reference}")
     fig.text(.02, .01, "Failed: " + ", ".join(failures) if failures else "Two warmups; ≥5 timed calls per configuration", fontsize=8)
@@ -323,15 +353,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["predict", "benchmark", "worker"], default="predict")
     parser.add_argument("--config", default="nf4")
+    parser.add_argument("--trim", action="store_true", help="drop masked camera and use 64 text slots; reject longer prompts")
     parser.add_argument("--configs", nargs="+", default=DEFAULT_CONFIGS)
     parser.add_argument("--steps", type=int, choices=[10, 5, 2], default=10)
     parser.add_argument("--frames", type=int, default=8)
     args = parser.parse_args()
     if args.mode == "benchmark":
-        benchmark(args.configs, args.frames)
+        benchmark([c.removesuffix("+trim") + "+trim" for c in args.configs] if args.trim else args.configs, args.frames)
         return
     try:
-        result = run_config(args.config, args.steps, args.frames if args.mode == "worker" else 1, args.mode == "worker")
+        result = run_config(args.config, args.steps, args.frames if args.mode == "worker" else 1, args.mode == "worker", args.trim)
     except Exception as error:
         result = {"status": "failed", "error": f"{type(error).__name__}: {error}"}
     if args.mode == "worker":

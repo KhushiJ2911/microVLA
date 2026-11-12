@@ -1,5 +1,7 @@
 """CPU data/checkpoint checks plus one real, optional GPU prediction."""
 import io
+import json
+from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
@@ -100,6 +102,64 @@ def test_saved_processors_cpu(cached_policy):
     assert batch["observation.images.image"].shape == (1, 3, 256, 256)
     output = post(torch.zeros(1, 50, 7))
     assert output.shape == (1, 50, 7) and torch.isfinite(output).all()
+
+
+def test_trimmed_processors_cpu(cached_policy, monkeypatch):
+    path, original = cached_policy
+    policy = infer.empty_policy(path, trim=True)
+    pre, _ = infer.processors(policy, path, device="cpu")
+    untrimmed, _ = infer.processors(original, path, device="cpu")
+    observation = {"task": "pick up the mug", "observation.state": torch.zeros(8),
+                   "observation.images.image": torch.ones(3, 256, 256),
+                   "observation.images.image2": torch.zeros(3, 256, 256)}
+    batch, baseline = pre(dict(observation)), untrimmed(dict(observation))
+    assert policy.config.empty_cameras == 0 and policy.config.tokenizer_max_length == 64
+    assert list(policy.config.image_features) == ["observation.images.image", "observation.images.image2"]
+    assert batch["observation.language.tokens"].shape == (1, 64)
+    for key in ("observation.language.tokens", "observation.language.attention_mask"):
+        torch.testing.assert_close(batch[key], baseline[key][:, :64])
+    assert not baseline["observation.language.attention_mask"][:, 64:].any()
+    # Exercise real image preprocessing without allocating the meta model's weights.
+    monkeypatch.setattr(policy, "parameters", lambda: iter([torch.empty(0)]))
+    images, masks = policy._preprocess_images(batch)
+    assert len(images) == len(masks) == 2 and all(mask.all() for mask in masks)
+    assert all(image.shape == (1, 3, 224, 224) for image in images)
+    with pytest.raises(ValueError, match=r"pick up the mug.*has \d+ tokens; trim limit is 64"):
+        pre({**observation, "task": "pick up the mug " * 80})
+
+
+@pytest.mark.parametrize("configs", [infer.DEFAULT_CONFIGS, ["steps-5+trim"], ["nf4+trim"]])
+def test_benchmark_trim_pairing_cpu(tmp_path, monkeypatch, configs):
+    calls = []
+    def worker(command, **kwargs):
+        placement = command[command.index("--config") + 1]
+        steps = int(command[command.index("--steps") + 1])
+        calls.append((placement, steps))
+        assert kwargs["env"]["PYTHONPATH"] == "" and kwargs["env"]["HF_HUB_OFFLINE"] == "1"
+        trimmed = placement.endswith("+trim")
+        action = steps + (.01 if trimmed else 0)
+        row = {"status": "ok", "placement": placement, "steps": steps, "trim": trimmed,
+               "latency_p50_ms": 1 if trimmed else (2 if placement == "nf4" else 3),
+               "resident_weight_gib": 2, "peak_allocated_gib": 2,
+               "prefix_tokens": {"images": 512 if trimmed else 768, "text": 64 if trimmed else 200},
+               "actions": [[[action, action]]], "samples": []}
+        return SimpleNamespace(stdout="RESULT=" + json.dumps(row), stderr="")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(infer, "subprocess", SimpleNamespace(run=worker))
+    monkeypatch.setattr(infer, "load_frames", lambda count: [infer.Frame({"task": "mug"}, torch.zeros(7), 0, 0)])
+    report = infer.benchmark(configs, count=1)
+    assert report["best_placement"] == "nf4"
+    for label, row in report["results"].items():
+        assert "actions" not in row
+        if label.endswith("+trim"):
+            assert row["vs_untrimmed"]["max_abs"] == pytest.approx(.01)
+            assert row["vs_untrimmed"]["mean_l2"] == pytest.approx(2**.5 * .01)
+            assert row["prefix_tokens"] == {"images": 512, "text": 64}
+            if label.startswith("steps-"):
+                assert row["placement"] == "nf4+trim" and ("nf4+trim", row["steps"]) in calls
+                assert row["vs_10_steps"]["max_abs"] == pytest.approx(10 - row["steps"] - .01)
+    assert (tmp_path / "runs/inference_bench.json").is_file()
+    assert (tmp_path / "assets/inference_bench.png").is_file()
 
 
 def test_deviation():
