@@ -83,6 +83,7 @@ def test_placement_preserves_hot_path_and_workspace(cached_policy, budget):
     resident_bytes = sum(p.numel() * 2 for n, p in parameters.items()
                          if not any(n.startswith(unit + ".") for unit in offloaded))
     assert resident_bytes + 700 * 2**20 <= budget * 2**30
+    assert infer.pinned_bytes(units, resident) == sum(p.numel() * 2 for p in parameters.values()) - resident_bytes
     largest_stream = max(sum(p.numel() * 2 for p in module.parameters())
                          for name, module in units if name in offloaded)
     assert largest_stream < 700 * 2**20
@@ -130,6 +131,10 @@ def test_trimmed_processors_cpu(cached_policy, monkeypatch):
 
 @pytest.mark.parametrize("configs", [infer.DEFAULT_CONFIGS, ["steps-5+trim"], ["nf4+trim"]])
 def test_benchmark_trim_pairing_cpu(tmp_path, monkeypatch, configs):
+    monkeypatch.setattr(infer, "check_pinned", lambda needed: None)
+    monkeypatch.setattr(infer, "checkpoint", lambda: tmp_path)
+    monkeypatch.setattr(infer, "empty_policy", lambda *args: nn.Linear(1, 1, device="meta"))
+    monkeypatch.setattr(infer, "placement", lambda *args: ([], set()))
     calls = []
     def worker(command, **kwargs):
         placement = command[command.index("--config") + 1]
@@ -148,9 +153,9 @@ def test_benchmark_trim_pairing_cpu(tmp_path, monkeypatch, configs):
     monkeypatch.setattr(infer, "subprocess", SimpleNamespace(run=worker))
     monkeypatch.setattr(infer, "load_frames", lambda count: [infer.Frame({"task": "mug"}, torch.zeros(7), 0, 0)])
     report = infer.benchmark(configs, count=1)
-    assert report["best_placement"] == "nf4"
+    assert report["best_placement"] == ("nf4+trim" if "nf4+trim" in report["results"] else "nf4")
     for label, row in report["results"].items():
-        assert "actions" not in row
+        assert row["actions"]
         if label.endswith("+trim"):
             assert row["vs_untrimmed"]["max_abs"] == pytest.approx(.01)
             assert row["vs_untrimmed"]["mean_l2"] == pytest.approx(2**.5 * .01)
@@ -159,7 +164,187 @@ def test_benchmark_trim_pairing_cpu(tmp_path, monkeypatch, configs):
                 assert row["placement"] == "nf4+trim" and ("nf4+trim", row["steps"]) in calls
                 assert row["vs_10_steps"]["max_abs"] == pytest.approx(10 - row["steps"] - .01)
     assert (tmp_path / "runs/inference_bench.json").is_file()
+    if configs == infer.DEFAULT_CONFIGS:
+        first_offload = next(i for i, (base, _) in enumerate(calls) if base.startswith("offload-"))
+        assert all(steps == 10 for _, steps in calls[first_offload:])
+        assert ("nf4+trim", 2) in calls
+    else:
+        assert not any(base.startswith("offload-") for base, _ in calls)
     assert (tmp_path / "assets/inference_bench.png").is_file()
+
+
+@pytest.fixture
+def cpu_bench(tmp_path, monkeypatch):
+    calls = []
+    def worker(command, **kwargs):
+        base = command[command.index("--config") + 1]
+        steps = int(command[command.index("--steps") + 1])
+        calls.append((base, steps))
+        row = {"status": "ok", "placement": base, "steps": steps, "trim": base.endswith("+trim"),
+               "latency_p50_ms": 1 if base.startswith("offload-") else 2,
+               "resident_weight_gib": 2, "peak_allocated_gib": 2, "actions": [[[float(steps) + int(base.startswith("offload-"))]]]}
+        return SimpleNamespace(stdout="RESULT=" + json.dumps(row), stderr="")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(infer, "subprocess", SimpleNamespace(run=worker))
+    monkeypatch.setattr(infer, "load_frames", lambda count: [infer.Frame({"task": "mug"}, torch.zeros(7), 0, i) for i in range(count)])
+    monkeypatch.setattr(infer, "checkpoint", lambda: tmp_path)
+    monkeypatch.setattr(infer, "empty_policy", lambda *args: nn.Linear(4, 4, bias=False, device="meta"))
+    monkeypatch.setattr(infer, "placement", lambda policy, budget: ([("prefix", policy)], set()))
+    return calls, tmp_path / "runs/inference_bench.json"
+
+
+def mock_meminfo(monkeypatch, available_gib):
+    original = infer.Path.read_text
+    def read(path, *args, **kwargs):
+        if str(path) == "/proc/meminfo":
+            return f"MemTotal: 16777216 kB\nMemFree: 0 kB\nMemAvailable: {int(available_gib * 2**20)} kB\n"
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(infer.Path, "read_text", read)
+
+
+def test_benchmark_resume_and_fresh(cpu_bench, monkeypatch):
+    calls, path = cpu_bench
+    infer.benchmark(["nf4+trim", "steps-5+trim", "steps-2+trim"], count=1)
+    first = json.loads(path.read_text())
+    assert all(base.startswith("nf4") for base, _ in calls)
+    assert all(row["actions"] for row in first["results"].values())
+    calls.clear()
+    assert infer.benchmark(["nf4+trim", "steps-5+trim", "steps-2+trim"], count=1) == first
+    assert calls == []
+    infer.benchmark(["nf4+trim"], count=1, fresh=True)
+    assert calls == [("nf4", 10), ("nf4+trim", 10)]
+    # CLI passes --fresh through to the coordinator.
+    monkeypatch.setattr(infer.sys, "argv", ["infer.py", "--mode", "benchmark", "--configs", "nf4", "--fresh"])
+    monkeypatch.setattr(infer, "benchmark", lambda configs, count, fresh: calls.append((configs, fresh)))
+    infer.main()
+    assert calls[-1] == (["nf4"], True)
+
+
+@pytest.mark.parametrize("change", ["policy", "revision", "frame_count"])
+def test_benchmark_invalidates_incompatible_cache(cpu_bench, change):
+    calls, path = cpu_bench
+    infer.benchmark(["nf4"], count=1)
+    cached = json.loads(path.read_text())
+    cached[change] = "different"
+    path.write_text(json.dumps(cached))
+    calls.clear()
+    infer.benchmark(["nf4"], count=1)
+    assert calls == [("nf4", 10)]
+
+
+@pytest.mark.parametrize("status", ["ok", "failed", "skipped"])
+def test_benchmark_saves_before_next_worker_and_resumes(cpu_bench, monkeypatch, status):
+    calls, path = cpu_bench
+    worker = infer.subprocess.run
+    replace = infer.Path.replace
+    replacements = []
+    def atomic(source, target):
+        assert source != target and source.parent == target.parent
+        json.loads(source.read_text())
+        replacements.append(target)
+        return replace(source, target)
+    def interrupted(command, **kwargs):
+        if len(calls):
+            cached = json.loads(path.read_text())
+            assert cached["results"]["nf4"]["status"] == status
+            assert replacements == [path.relative_to(path.parents[1])]
+            if status == "ok":
+                assert cached["results"]["nf4"]["vs_reference"]["max_abs"] == 0
+            raise KeyboardInterrupt
+        result = worker(command, **kwargs)
+        return result if status == "ok" else SimpleNamespace(stdout="RESULT=" + json.dumps({"status": status}), stderr="")
+    monkeypatch.setattr(infer.Path, "replace", atomic)
+    monkeypatch.setattr(infer.subprocess, "run", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        infer.benchmark(["nf4", "offload-3.5"], count=1)
+    monkeypatch.setattr(infer.subprocess, "run", worker)
+    calls.clear()
+    report = infer.benchmark(["nf4"], count=1)
+    assert calls == [] and report["results"]["nf4"]["status"] == status
+
+
+def test_benchmark_reuses_legacy_rows_without_actions(cpu_bench):
+    calls, path = cpu_bench
+    infer.benchmark(["nf4"], count=1)
+    cached = json.loads(path.read_text())
+    cached["results"]["nf4"].pop("actions")
+    path.write_text(json.dumps(cached))
+    calls.clear()
+    report = infer.benchmark(["nf4", "steps-5"], count=1)
+    assert calls == [("nf4", 5)]
+    assert report["results"]["nf4"] == cached["results"]["nf4"]
+    assert "actions unavailable" in report["results"]["steps-5"]["vs_reference"]["error"]
+
+
+def test_offload_preflight_skips_and_continues(cpu_bench, monkeypatch):
+    calls, path = cpu_bench
+    mock_meminfo(monkeypatch, 2)  # All MemAvailable is reserved; even 32 pinned bytes must be refused.
+    report = infer.benchmark(["offload-2.5", "nf4", "steps-2+trim"], count=1)
+    skipped = report["results"]["offload-2.5"]
+    assert skipped["status"] == "skipped" and "needs" in skipped["reason"]
+    assert "GiB pinned, 0.00 GiB available" in skipped["reason"]
+    assert all(base.startswith("nf4") for base, _ in calls)
+    assert json.loads(path.read_text())["results"]["offload-2.5"] == skipped
+    calls.clear()
+    mock_meminfo(monkeypatch, 16)
+    infer.benchmark(["offload-2.5"], count=1)
+    assert calls == []  # Skips are cached, too; --fresh is the explicit retry.
+    infer.benchmark(["offload-2.5"], count=1, fresh=True)
+    assert calls == [("offload-2.5", 10)]
+
+
+def test_pinned_estimate_and_memavailable(monkeypatch):
+    modules = [("offloaded", nn.Linear(1024, 1024, bias=False, device="meta")),
+               ("resident", nn.Linear(32, 32, device="meta"))]
+    needed = infer.pinned_bytes(modules, {"resident"})
+    assert needed == 2 * 1024**2
+    mock_meminfo(monkeypatch, 2 + needed / 2**30)
+    infer.check_pinned(needed)  # Exact fit after the reserve; MemFree is deliberately zero.
+    mock_meminfo(monkeypatch, 2 + needed / 2**31)
+    with pytest.raises(infer.OffloadRAMError, match="GiB pinned"):
+        infer.check_pinned(needed)
+
+
+def test_worker_rechecks_before_pinning(cpu_bench, monkeypatch, capsys):
+    import safetensors
+    mock_meminfo(monkeypatch, 2)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "set_per_process_memory_fraction", lambda fraction: None)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: SimpleNamespace(total_memory=4 * 2**30))
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    model = nn.Module()
+    model.prefix = nn.Linear(4, 4, bias=False, device="meta")
+    monkeypatch.setattr(infer, "empty_policy", lambda *args: model)
+    monkeypatch.setattr(infer, "placement", lambda *args: ([("prefix", model.prefix)], set()))
+    class Weights:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def keys(self): return ["prefix.weight"]
+        def get_tensor(self, name): return torch.zeros(4, 4)
+    monkeypatch.setattr(safetensors, "safe_open", lambda *args, **kwargs: Weights())
+    monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: pytest.fail("must check before pinning"))
+    with pytest.raises(infer.OffloadRAMError):
+        infer.load_policy("offload-2.5")
+    monkeypatch.setattr(infer.sys, "argv", ["infer.py", "--mode", "worker", "--config", "offload-2.5"])
+    monkeypatch.setattr(infer, "load_frames", lambda count: [])
+    infer.main()
+    result = json.loads(capsys.readouterr().out.removeprefix("RESULT="))
+    assert result["status"] == "skipped" and "GiB pinned" in result["reason"]
+
+
+def test_steps_use_only_completed_or_cached_placements(cpu_bench, monkeypatch):
+    calls, _ = cpu_bench
+    mock_meminfo(monkeypatch, 16)
+    infer.benchmark(["steps-5", "offload-3.5"], count=1)
+    assert calls == [("nf4", 10), ("nf4", 5), ("offload-3.5", 10)]
+    calls.clear()
+    report = infer.benchmark(["steps-2+trim"], count=1)
+    assert calls == [("offload-3.5", 2), ("offload-3.5+trim", 2)]
+    assert report["results"]["steps-5"]["placement"] == "nf4"
+    assert report["results"]["steps-5"]["vs_10_steps"]["max_abs"] == 5
+    assert report["results"]["steps-2"]["placement"] == "offload-3.5"
+    assert report["results"]["nf4"]["vs_reference"]["max_abs"] == 1
+    assert report["results"]["steps-5"]["vs_reference"]["max_abs"] == 6
 
 
 def test_deviation():

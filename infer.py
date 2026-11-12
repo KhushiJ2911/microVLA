@@ -29,8 +29,8 @@ from torch import Tensor, nn
 POLICY = "lerobot/pi05_libero_finetuned_v044"
 REVISION = "7152f13e34c6c115d808aea0e5d08aca74eac14b"
 PREFIX = "model.paligemma_with_expert.paligemma.model"
-DEFAULT_CONFIGS = ["nf4", "nf4+trim", "offload-3.5", "offload-2.5", "offload-2.5+trim",
-                   "steps-10", "steps-5", "steps-5+trim", "steps-2"]
+DEFAULT_CONFIGS = ["nf4", "nf4+trim", "steps-10", "steps-5", "steps-5+trim", "steps-2", "steps-2+trim",
+                   "offload-3.5", "offload-2.5", "offload-2.5+trim"]
 
 
 @dataclass
@@ -124,6 +124,21 @@ def placement(policy: nn.Module, budget: float) -> tuple[list, set]:
     return units, resident
 
 
+class OffloadRAMError(RuntimeError):
+    pass
+
+
+def pinned_bytes(units: list, resident: set) -> int:
+    return sum(p.numel() * 2 for name, module in units if name not in resident for p in module.parameters())
+
+
+def check_pinned(needed: int) -> None:
+    meminfo = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+    available = max(0, int(meminfo["MemAvailable"].split()[0]) * 1024 - 2 * 2**30)
+    if needed > available:
+        raise OffloadRAMError(f"offload needs {needed / 2**30:.2f} GiB pinned, {available / 2**30:.2f} GiB available after 2 GiB reserve")
+
+
 def weight_sources(policy: nn.Module, keys: list[str]) -> dict[str, str]:
     """Transformers 5 flattened SigLIP; the checkpoint also stores tied embeddings as lm_head."""
     sources = {}
@@ -152,6 +167,7 @@ def load_policy(config: str = "nf4", trim: bool = False) -> tuple[nn.Module, Cal
     policy = empty_policy(path, trim)
     units, resident = placement(policy, budget) if budget else ([], set())
     offloaded = [n for n, _ in units if n not in resident]
+    remaining_pinned = pinned_bytes(units, resident)
     if config == "nf4":
         import bitsandbytes as bnb
         for name, module in list(policy.named_modules()):
@@ -178,6 +194,9 @@ def load_policy(config: str = "nf4", trim: bool = False) -> tuple[nn.Module, Cal
                                                             compress_statistics=True, quant_type="nf4").to("cuda")
             else:
                 value = value.to(dtype=torch.bfloat16)
+                if cpu:
+                    check_pinned(remaining_pinned)
+                    remaining_pinned -= value.numel() * 2
                 value = value.pin_memory() if cpu else value.to("cuda")
                 module._parameters[attr] = nn.Parameter(value, requires_grad=False)
     for module in policy.modules():
@@ -283,65 +302,85 @@ def deviation(actions: list, reference: list) -> dict[str, float]:
     return {"mean_l2": float(np.linalg.norm(delta, axis=-1).mean()), "max_abs": float(np.abs(delta).max())}
 
 
-def benchmark(configs: list[str], count: int = 8) -> dict:
-    """Isolate allocator budgets and failed CUDA contexts in fresh processes."""
-    results = {}
-    configs = list(dict.fromkeys(c for label in configs for c in
-                                 ([label.removesuffix("+trim"), label] if label.endswith("+trim") else [label])))
-    bases = list(dict.fromkeys([c for c in configs if not c.startswith("steps-")]
-                              + (["nf4", "offload-3.5", "offload-2.5"] if any(c.startswith("steps-") for c in configs) else [])))
-    def execute(label, base, steps):
-        process = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--mode", "worker", "--config", base,
-                                  "--steps", str(steps), "--frames", str(count)], capture_output=True, text=True,
-                                 env={**os.environ, "PYTHONPATH": "", "HF_HUB_OFFLINE": "1"})
-        lines = [line[7:] for line in process.stdout.splitlines() if line.startswith("RESULT=")]
-        results[label] = json.loads(lines[-1]) if lines else {"status": "failed", "error": process.stderr[-4000:] or process.stdout[-4000:]}
-        print(label, results[label].get("latency_p50_ms", results[label].get("error")), flush=True)
-    for base in bases:
-        execute(base, base, 10)
-    successes = [c for c in bases if results[c]["status"] == "ok" and not c.endswith("+trim")]
-    best = min(successes, key=lambda c: results[c]["latency_p50_ms"]) if successes else None
-    reference = max(successes, key=lambda c: (c.startswith("offload-"), results[c]["resident_weight_gib"])) if successes else None
-    for label in configs:
-        if label.startswith("steps-"):
-            k = int(label.removeprefix("steps-").removesuffix("+trim"))
-            base = best + ("+trim" if label.endswith("+trim") else "") if best else None
-            if base in results and k == 10:
-                results[label] = dict(results[base])
-            elif best:
-                execute(label, base, k)
-            else:
-                results[label] = {"status": "failed", "error": "no successful placement for flow-step sweep"}
-    for label, row in results.items():
-        if row["status"] == "ok":
-            if reference:
-                row["vs_reference"] = deviation(row["actions"], results[reference]["actions"])
-            if label.startswith("steps-"):
-                row["vs_10_steps"] = deviation(row["actions"], results[best]["actions"])
-            if label.endswith("+trim"):
-                counterpart = results[label.removesuffix("+trim")]
-                row["vs_untrimmed"] = (deviation(row["actions"], counterpart["actions"]) if counterpart["status"] == "ok"
-                                       else {"error": "untrimmed counterpart failed"})
-    for row in results.values():
-        row.pop("actions", None)
+def benchmark(configs: list[str], count: int = 8, fresh: bool = False) -> dict:
+    """Persist every completed worker; isolate allocator budgets and failed CUDA contexts."""
+    path = Path("runs/inference_bench.json")
+    cached = json.loads(path.read_text()) if path.exists() and not fresh else {}
+    results = cached.get("results", {}) if (cached.get("policy"), cached.get("revision"),
+              cached.get("frame_count", len(cached.get("frames", [])))) == (POLICY, REVISION, count) else {}
     report = {"policy": POLICY, "revision": REVISION, "units": "GiB, ms; actions in dataset units",
-              "reference": reference, "best_placement": best, "warmups": 2, "seed": "frame ordinal",
+              "frame_count": count, "warmups": 2, "seed": "frame ordinal",
               "frames": [{"episode": f.episode, "frame": f.index, "task": f.observation["task"]} for f in load_frames(count)],
               "results": results}
-    Path("runs").mkdir(exist_ok=True)
-    Path("runs/inference_bench.json").write_text(json.dumps(report, indent=2) + "\n")
+    def placements():
+        return [c for c, r in results.items() if not c.startswith("steps-") and r["status"] == "ok"]
+    def save():
+        successes = placements()
+        originals = [c for c in successes if not c.endswith("+trim")]
+        reference = max(originals, key=lambda c: (c.startswith("offload-"), results[c]["resident_weight_gib"])) if originals else None
+        report.update(reference=reference, best_placement=min(successes, key=lambda c: results[c]["latency_p50_ms"]) if successes else None)
+        for label, row in results.items():
+            if row["status"] != "ok":
+                continue
+            for key, other in [("vs_reference", reference),
+                               ("vs_10_steps", row["placement"].removesuffix("+trim") if label.startswith("steps-") else None),
+                               ("vs_untrimmed", label.removesuffix("+trim") if label.endswith("+trim") else None)]:
+                target = results.get(other, {})
+                if row.get("actions") and target.get("actions"):
+                    row[key] = deviation(row["actions"], target["actions"])
+                elif other and (key not in row or (key == "vs_reference" and reference != cached.get("reference"))):
+                    row[key] = {"error": "comparison actions unavailable; use --fresh to regenerate"}
+        path.parent.mkdir(exist_ok=True)
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(report, indent=2) + "\n")
+        temporary.replace(path)
+    def execute(label, base, steps):
+        if label in results:
+            return
+        try:
+            if base.startswith("offload-"):
+                policy = empty_policy(checkpoint(), base.endswith("+trim"))
+                check_pinned(pinned_bytes(*placement(policy, float(base.removeprefix("offload-").removesuffix("+trim")))))
+                del policy
+            process = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--mode", "worker", "--config", base,
+                                      "--steps", str(steps), "--frames", str(count)], capture_output=True, text=True,
+                                     env={**os.environ, "PYTHONPATH": "", "HF_HUB_OFFLINE": "1"})
+            lines = [line[7:] for line in process.stdout.splitlines() if line.startswith("RESULT=")]
+            results[label] = json.loads(lines[-1]) if lines else {"status": "failed", "error": process.stderr[-4000:] or process.stdout[-4000:]}
+        except OffloadRAMError as error:
+            results[label] = {"status": "skipped", "reason": str(error)}
+        except Exception as error:
+            results[label] = {"status": "failed", "error": f"{type(error).__name__}: {error}"}
+        save()
+        print(label, results[label].get("latency_p50_ms", results[label].get("reason", results[label].get("error"))), flush=True)
+    for label in dict.fromkeys(c for label in configs for c in
+                              ([label.removesuffix("+trim"), label] if label.endswith("+trim") else [label])):
+        if label.startswith("steps-") and label not in results:
+            if not placements():
+                execute("nf4", "nf4", 10)
+            best = min(placements(), key=lambda c: results[c]["latency_p50_ms"], default="nf4")
+            base = best.removesuffix("+trim") + ("+trim" if label.endswith("+trim") else "")
+            k = int(label.removeprefix("steps-").removesuffix("+trim"))
+            if base in results and k == 10:
+                results[label] = dict(results[base])
+                save()
+            else:
+                execute(label, base, k)
+        else:
+            execute(label, label, 10)
+    save()
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(10, 5))
     for label, row in results.items():
         if row["status"] == "ok":
-            x, y = row["peak_allocated_gib"], row["latency_p50_ms"]
-            ax.scatter(x, y, marker="X" if row["trim"] else "o", s=65, label=label)
-    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", title="Trim: X; original: circle")
+            ax.scatter(row["peak_allocated_gib"], row["latency_p50_ms"], marker="X" if row["trim"] else "o", s=65, label=label)
+    if placements():
+        ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", title="Trim: X; original: circle")
     failures = [c for c, r in results.items() if r["status"] != "ok"]
-    ax.set(xlabel="Peak allocated VRAM (GiB)", ylabel="Chunk latency p50 (ms)", title=f"pi0.5 LIBERO — reference: {reference}")
-    fig.text(.02, .01, "Failed: " + ", ".join(failures) if failures else "Two warmups; ≥5 timed calls per configuration", fontsize=8)
+    ax.set(xlabel="Peak allocated VRAM (GiB)", ylabel="Chunk latency p50 (ms)", title=f"pi0.5 LIBERO — reference: {report['reference']}")
+    fig.text(.02, .01, "Failed/skipped: " + ", ".join(failures) if failures else "Two warmups; ≥5 timed calls per configuration", fontsize=8)
     fig.tight_layout(rect=(0, .04, 1, 1))
     Path("assets").mkdir(exist_ok=True)
     fig.savefig("assets/inference_bench.png", dpi=150)
@@ -357,12 +396,15 @@ def main() -> None:
     parser.add_argument("--configs", nargs="+", default=DEFAULT_CONFIGS)
     parser.add_argument("--steps", type=int, choices=[10, 5, 2], default=10)
     parser.add_argument("--frames", type=int, default=8)
+    parser.add_argument("--fresh", action="store_true", help="ignore cached benchmark rows")
     args = parser.parse_args()
     if args.mode == "benchmark":
-        benchmark([c.removesuffix("+trim") + "+trim" for c in args.configs] if args.trim else args.configs, args.frames)
+        benchmark([c.removesuffix("+trim") + "+trim" for c in args.configs] if args.trim else args.configs, args.frames, args.fresh)
         return
     try:
         result = run_config(args.config, args.steps, args.frames if args.mode == "worker" else 1, args.mode == "worker", args.trim)
+    except OffloadRAMError as error:
+        result = {"status": "skipped", "reason": str(error)}
     except Exception as error:
         result = {"status": "failed", "error": f"{type(error).__name__}: {error}"}
     if args.mode == "worker":
