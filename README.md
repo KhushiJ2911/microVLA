@@ -86,6 +86,12 @@ rates include all finished episodes, including incomplete pairs. Published openp
 rates (Spatial 98.8%, Object 98.2%, Goal 98.0%, LIBERO-10 92.4%) appear as an external
 sanity anchor from a different checkpoint/framework, never as a paired comparison.
 
+Run `PYTHONPATH= /home/keyu/Documents/ChatGPT/Mujuco/.venv/bin/python plot_libero.py --suite libero_spatial`
+to write the three-panel results figure to `assets/libero_results.png`. On this laptop,
+prefix evaluation commands with `__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json MUJOCO_EGL_DEVICE_ID=1 CUDA_VISIBLE_DEVICES=0,1`
+to render the simulator on the Intel iGPU without taking memory from the 4 GB NVIDIA
+card; NVIDIA EGL with the NF4 policy went out of memory.
+
 Set `--videos` on the initial run (default 0). The first requested pairs get captioned
 `*_paired.mp4` clips under `assets/libero/`, with arms in argument order within each placement
 at the simulator's 20 Hz; the shorter episode holds its final frame. Scene clips are
