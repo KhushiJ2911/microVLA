@@ -288,7 +288,8 @@ def demo(sim, args, device: torch.device) -> None:
         torch.manual_seed(args.seed)
         result = sim.evaluate(policy, 3, args.seed, device, record=3)
         clips.append(result["frames"])
-        labels.extend([f"step {ckpt['step']} / episode {i + 1}" for i in range(3)])
+        tasks = sim.reset(3, args.seed + sim.EVAL_SEED_OFFSET, device)[:, 17:19]
+        labels.extend([f"step {ckpt['step']}: {sim.instruction_text(t)}" for t in tasks])
     Path("assets").mkdir(exist_ok=True)
     length = max(clip.shape[0] for clip in clips)
     clips = [torch.cat((clip, clip[-1:].expand(length - len(clip), -1, -1, -1, -1))) for clip in clips]
@@ -299,7 +300,11 @@ def demo(sim, args, device: torch.device) -> None:
         clips.append(sim.evaluate(policy, 1, args.seed, device, swap=swap, record=1)["frames"])
     length = max(len(clip) for clip in clips)
     clips = [torch.cat((clip, clip[-1:].expand(length - len(clip), -1, -1, -1, -1))) for clip in clips]
-    sim.save_gif(torch.cat(clips, 1), "assets/language_swap.gif", labels=["original instruction", "swapped instruction"])
+    scene = sim.reset(1, args.seed + sim.EVAL_SEED_OFFSET, device)
+    swapped = scene[:, 17:19].clone()
+    swapped[:, 0] = torch.where(scene[:, 7] == scene[:, 17], scene[:, 8], scene[:, 7])
+    sim.save_gif(torch.cat(clips, 1), "assets/language_swap.gif",
+                 labels=[sim.instruction_text(scene[0, 17:19]), sim.instruction_text(swapped[0])])
 
 
 def distill_vision(model: MicroVLA, sim, device: torch.device, steps: int, path: Path, writer) -> None:
