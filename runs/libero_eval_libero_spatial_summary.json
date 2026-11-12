@@ -1,0 +1,201 @@
+{
+  "arms": {
+    "nf4+trim:10": {
+      "episodes": 100,
+      "successes": 98,
+      "rate": 0.98,
+      "wilson95": [
+        0.929988209271456,
+        0.9944980324498376
+      ],
+      "mean_policy_latency_s": 0.8149165708541042
+    },
+    "nf4+trim:5": {
+      "episodes": 100,
+      "successes": 98,
+      "rate": 0.98,
+      "wilson95": [
+        0.929988209271456,
+        0.9944980324498376
+      ],
+      "mean_policy_latency_s": 0.6998118277901475
+    }
+  },
+  "per_task": {
+    "0": {
+      "task_text": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+      "nf4+trim:10": [
+        10,
+        10
+      ],
+      "nf4+trim:5": [
+        10,
+        10
+      ]
+    },
+    "1": {
+      "task_text": "pick up the black bowl next to the ramekin and place it on the plate",
+      "nf4+trim:10": [
+        10,
+        10
+      ],
+      "nf4+trim:5": [
+        10,
+        10
+      ]
+    },
+    "2": {
+      "task_text": "pick up the black bowl from table center and place it on the plate",
+      "nf4+trim:10": [
+        10,
+        10
+      ],
+      "nf4+trim:5": [
+        10,
+        10
+      ]
+    },
+    "3": {
+      "task_text": "pick up the black bowl on the cookie box and place it on the plate",
+      "nf4+trim:10": [
+        10,
+        10
+      ],
+      "nf4+trim:5": [
+        10,
+        10
+      ]
+    },
+    "4": {
+      "task_text": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "nf4+trim:10": [
+        10,
+        10
+      ],
+      "nf4+trim:5": [
+        10,
+        10
+      ]
+    },
+    "5": {
+      "task_text": "pick up the black bowl on the ramekin and place it on the plate",
+      "nf4+trim:10": [
+        8,
+        10
+      ],
+      "nf4+trim:5": [
+        10,
+        10
+      ]
+    },
+    "6": {
+      "task_text": "pick up the black bowl next to the cookie box and place it on the plate",
+      "nf4+trim:10": [
+        10,
+        10
+      ],
+      "nf4+trim:5": [
+        10,
+        10
+      ]
+    },
+    "7": {
+      "task_text": "pick up the black bowl on the stove and place it on the plate",
+      "nf4+trim:10": [
+        10,
+        10
+      ],
+      "nf4+trim:5": [
+        10,
+        10
+      ]
+    },
+    "8": {
+      "task_text": "pick up the black bowl next to the plate and place it on the plate",
+      "nf4+trim:10": [
+        10,
+        10
+      ],
+      "nf4+trim:5": [
+        10,
+        10
+      ]
+    },
+    "9": {
+      "task_text": "pick up the black bowl on the wooden cabinet and place it on the plate",
+      "nf4+trim:10": [
+        10,
+        10
+      ],
+      "nf4+trim:5": [
+        8,
+        10
+      ]
+    }
+  },
+  "paired": {
+    "nf4+trim:10 vs nf4+trim:5": {
+      "arm_a": "nf4+trim:10",
+      "arm_b": "nf4+trim:5",
+      "table": {
+        "both_succeed": 96,
+        "only_a": 2,
+        "only_b": 2,
+        "both_fail": 0
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.0
+    }
+  },
+  "protocol": {
+    "version": 3,
+    "suite": "libero_spatial",
+    "replan": 5,
+    "env_seed": 7,
+    "max_episode_steps": 220,
+    "num_steps_wait": 10,
+    "no_op_action": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      -1
+    ],
+    "observation_height": 256,
+    "observation_width": 256,
+    "fps": 20,
+    "init_state_selection": "episode index (0-based)",
+    "official_inits_per_task": 50,
+    "seed_scheme": "sha256(suite:task:init:chunk), first 4 bytes little-endian; CPU torch.Generator",
+    "policy": "lerobot/pi05_libero_finetuned_v044",
+    "revision": "7152f13e34c6c115d808aea0e5d08aca74eac14b"
+  },
+  "external_sanity_anchor": {
+    "label": "openpi published; different checkpoint/framework; not paired",
+    "success_percent": {
+      "libero_spatial": 98.8,
+      "libero_object": 98.2,
+      "libero_goal": 98.0,
+      "libero_10": 92.4
+    }
+  },
+  "n_action_steps": [
+    5
+  ],
+  "checkpoint_n_action_steps": [
+    50
+  ],
+  "chunk_size": [
+    50
+  ],
+  "max_episode_steps": [
+    220
+  ],
+  "inits_requested": [
+    1,
+    10
+  ]
+}
