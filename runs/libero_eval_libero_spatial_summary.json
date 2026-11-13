@@ -8,6 +8,10 @@
         0.929988209271456,
         0.9944980324498376
       ],
+      "model_identity": {
+        "policy": "lerobot/pi05_libero_finetuned_v044",
+        "revision": "7152f13e34c6c115d808aea0e5d08aca74eac14b"
+      },
       "mean_policy_latency_s": 0.8149165708541042
     },
     "nf4+trim:5": {
@@ -18,7 +22,25 @@
         0.929988209271456,
         0.9944980324498376
       ],
+      "model_identity": {
+        "policy": "lerobot/pi05_libero_finetuned_v044",
+        "revision": "7152f13e34c6c115d808aea0e5d08aca74eac14b"
+      },
       "mean_policy_latency_s": 0.6998118277901475
+    },
+    "offload-3.5:10": {
+      "episodes": 100,
+      "successes": 99,
+      "rate": 0.99,
+      "wilson95": [
+        0.9455138038212946,
+        0.9982325679358593
+      ],
+      "model_identity": {
+        "policy": "lerobot/pi05_libero_finetuned_v044",
+        "revision": "7152f13e34c6c115d808aea0e5d08aca74eac14b"
+      },
+      "mean_policy_latency_s": 3.2730822959660673
     }
   },
   "per_task": {
@@ -29,6 +51,10 @@
         10
       ],
       "nf4+trim:5": [
+        10,
+        10
+      ],
+      "offload-3.5:10": [
         10,
         10
       ]
@@ -42,6 +68,10 @@
       "nf4+trim:5": [
         10,
         10
+      ],
+      "offload-3.5:10": [
+        10,
+        10
       ]
     },
     "2": {
@@ -51,6 +81,10 @@
         10
       ],
       "nf4+trim:5": [
+        10,
+        10
+      ],
+      "offload-3.5:10": [
         10,
         10
       ]
@@ -64,6 +98,10 @@
       "nf4+trim:5": [
         10,
         10
+      ],
+      "offload-3.5:10": [
+        10,
+        10
       ]
     },
     "4": {
@@ -73,6 +111,10 @@
         10
       ],
       "nf4+trim:5": [
+        10,
+        10
+      ],
+      "offload-3.5:10": [
         10,
         10
       ]
@@ -86,6 +128,10 @@
       "nf4+trim:5": [
         10,
         10
+      ],
+      "offload-3.5:10": [
+        10,
+        10
       ]
     },
     "6": {
@@ -95,6 +141,10 @@
         10
       ],
       "nf4+trim:5": [
+        10,
+        10
+      ],
+      "offload-3.5:10": [
         10,
         10
       ]
@@ -108,6 +158,10 @@
       "nf4+trim:5": [
         10,
         10
+      ],
+      "offload-3.5:10": [
+        10,
+        10
       ]
     },
     "8": {
@@ -117,6 +171,10 @@
         10
       ],
       "nf4+trim:5": [
+        10,
+        10
+      ],
+      "offload-3.5:10": [
         10,
         10
       ]
@@ -129,6 +187,10 @@
       ],
       "nf4+trim:5": [
         8,
+        10
+      ],
+      "offload-3.5:10": [
+        9,
         10
       ]
     }
@@ -146,10 +208,36 @@
       "complete_pairs": 100,
       "incomplete_pairs": 0,
       "mcnemar_exact_p": 1.0
+    },
+    "nf4+trim:10 vs offload-3.5:10": {
+      "arm_a": "nf4+trim:10",
+      "arm_b": "offload-3.5:10",
+      "table": {
+        "both_succeed": 97,
+        "only_a": 1,
+        "only_b": 2,
+        "both_fail": 0
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.0
+    },
+    "nf4+trim:5 vs offload-3.5:10": {
+      "arm_a": "nf4+trim:5",
+      "arm_b": "offload-3.5:10",
+      "table": {
+        "both_succeed": 98,
+        "only_a": 0,
+        "only_b": 1,
+        "both_fail": 1
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.0
     }
   },
   "protocol": {
-    "version": 3,
+    "version": 4,
     "suite": "libero_spatial",
     "replan": 5,
     "env_seed": 7,
@@ -169,9 +257,7 @@
     "fps": 20,
     "init_state_selection": "episode index (0-based)",
     "official_inits_per_task": 50,
-    "seed_scheme": "sha256(suite:task:init:chunk), first 4 bytes little-endian; CPU torch.Generator",
-    "policy": "lerobot/pi05_libero_finetuned_v044",
-    "revision": "7152f13e34c6c115d808aea0e5d08aca74eac14b"
+    "seed_scheme": "sha256(suite:task:init:chunk), first 4 bytes little-endian; CPU torch.Generator"
   },
   "external_sanity_anchor": {
     "label": "openpi published; different checkpoint/framework; not paired",
