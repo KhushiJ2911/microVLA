@@ -41,6 +41,20 @@
         "revision": "7152f13e34c6c115d808aea0e5d08aca74eac14b"
       },
       "mean_policy_latency_s": 3.2730822959660673
+    },
+    "tiny:10": {
+      "episodes": 100,
+      "successes": 75,
+      "rate": 0.75,
+      "wilson95": [
+        0.656955364519384,
+        0.8245478863771232
+      ],
+      "model_identity": {
+        "checkpoint_path": "/home/keyu/Documents/ChatGPT/Mujuco/.worktrees/infer/runs/libero_tiny/latest.pt",
+        "checkpoint_sha256": "dc4a45c6585a0054e0938edd52fd440a277503e164ad6aaa64a587f315e14be0"
+      },
+      "mean_policy_latency_s": 0.07022120767739297
     }
   },
   "per_task": {
@@ -57,6 +71,10 @@
       "offload-3.5:10": [
         10,
         10
+      ],
+      "tiny:10": [
+        9,
+        10
       ]
     },
     "1": {
@@ -70,6 +88,10 @@
         10
       ],
       "offload-3.5:10": [
+        10,
+        10
+      ],
+      "tiny:10": [
         10,
         10
       ]
@@ -87,6 +109,10 @@
       "offload-3.5:10": [
         10,
         10
+      ],
+      "tiny:10": [
+        9,
+        10
       ]
     },
     "3": {
@@ -100,6 +126,10 @@
         10
       ],
       "offload-3.5:10": [
+        10,
+        10
+      ],
+      "tiny:10": [
         10,
         10
       ]
@@ -117,6 +147,10 @@
       "offload-3.5:10": [
         10,
         10
+      ],
+      "tiny:10": [
+        4,
+        10
       ]
     },
     "5": {
@@ -131,6 +165,10 @@
       ],
       "offload-3.5:10": [
         10,
+        10
+      ],
+      "tiny:10": [
+        5,
         10
       ]
     },
@@ -147,6 +185,10 @@
       "offload-3.5:10": [
         10,
         10
+      ],
+      "tiny:10": [
+        9,
+        10
       ]
     },
     "7": {
@@ -160,6 +202,10 @@
         10
       ],
       "offload-3.5:10": [
+        10,
+        10
+      ],
+      "tiny:10": [
         10,
         10
       ]
@@ -177,6 +223,10 @@
       "offload-3.5:10": [
         10,
         10
+      ],
+      "tiny:10": [
+        4,
+        10
       ]
     },
     "9": {
@@ -191,6 +241,10 @@
       ],
       "offload-3.5:10": [
         9,
+        10
+      ],
+      "tiny:10": [
+        5,
         10
       ]
     }
@@ -222,6 +276,19 @@
       "incomplete_pairs": 0,
       "mcnemar_exact_p": 1.0
     },
+    "nf4+trim:10 vs tiny:10": {
+      "arm_a": "nf4+trim:10",
+      "arm_b": "tiny:10",
+      "table": {
+        "both_succeed": 74,
+        "only_a": 24,
+        "only_b": 1,
+        "both_fail": 1
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.5497207641601562e-06
+    },
     "nf4+trim:5 vs offload-3.5:10": {
       "arm_a": "nf4+trim:5",
       "arm_b": "offload-3.5:10",
@@ -234,6 +301,32 @@
       "complete_pairs": 100,
       "incomplete_pairs": 0,
       "mcnemar_exact_p": 1.0
+    },
+    "nf4+trim:5 vs tiny:10": {
+      "arm_a": "nf4+trim:5",
+      "arm_b": "tiny:10",
+      "table": {
+        "both_succeed": 75,
+        "only_a": 23,
+        "only_b": 0,
+        "both_fail": 2
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 2.384185791015625e-07
+    },
+    "offload-3.5:10 vs tiny:10": {
+      "arm_a": "offload-3.5:10",
+      "arm_b": "tiny:10",
+      "table": {
+        "both_succeed": 75,
+        "only_a": 24,
+        "only_b": 0,
+        "both_fail": 1
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.1920928955078125e-07
     }
   },
   "protocol": {
@@ -272,9 +365,11 @@
     5
   ],
   "checkpoint_n_action_steps": [
+    16,
     50
   ],
   "chunk_size": [
+    16,
     50
   ],
   "max_episode_steps": [
