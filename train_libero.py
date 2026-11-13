@@ -35,13 +35,19 @@ def tokenizer(texts):
             "length": max(map(lambda t: len(words(t)), texts))}
 
 
-def tokenize(texts, tok):
+def tokenize(texts, tok, *, truncate=False):
+    """Keep training length checks; inference may clip to the saved context length."""
     lookup = {w: i for i, w in enumerate(tok["vocab"])}
+    # Reuse the checkpoint's reserved embedding; legacy vocabularies without <unk>
+    # use padding (ID 0, masked by MicroVLA), without adding/resizing embeddings.
+    unk = lookup.get("<unk>", 0)
     out = np.zeros((len(texts), tok["length"]), dtype=np.int64)
     for i, text in enumerate(texts):
-        ids = [lookup.get(w, 1) for w in words(text)]
+        ids = [lookup.get(w, unk) for w in words(text)]
         if len(ids) > tok["length"]:
-            raise ValueError("Instruction exceeds saved tokenizer length")
+            if not truncate:
+                raise ValueError("Instruction exceeds saved tokenizer length")
+            ids = ids[:tok["length"]]
         out[i, :len(ids)] = ids
     return out
 
@@ -322,6 +328,14 @@ class TinyPolicy(nn.Module):
     def reset(self):
         self.queue = deque()
 
+    def instruction_tokenization(self, text):
+        """Describe the policy's instruction, counting OOVs before truncation."""
+        if self.ablation == "wrong-text":
+            text = self.wrong_text[text]
+        tokens = words(text)
+        return dict(oov_fraction=sum(w not in self.tok["vocab"] for w in tokens) / max(1, len(tokens)),
+                    truncated=len(tokens) > self.tok["length"])
+
     def prepare(self, batch):
         device = next(self.parameters()).device
         images = []
@@ -338,7 +352,7 @@ class TinyPolicy(nn.Module):
         value = batch["observation.state"]
         state = torch.as_tensor(value.copy() if isinstance(value, np.ndarray) else value, device=device, dtype=torch.float32)
         texts = [self.wrong_text[t] for t in batch["task"]] if self.ablation == "wrong-text" else batch["task"]
-        instr = torch.from_numpy(tokenize(texts, self.tok)).to(device)
+        instr = torch.from_numpy(tokenize(texts, self.tok, truncate=True)).to(device)
         images, state = torch.stack(images, 1).to(device), normalize(state, self.norm["state"])
         if self.ablation == "blind":
             images.zero_()

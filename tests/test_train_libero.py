@@ -216,6 +216,40 @@ def test_tokenizer_padding_unknown_and_round_trip():
     assert np.isfinite(tl.fit_norm(np.zeros((3, 8)))["scale"]).all()
 
 
+@pytest.mark.parametrize("vocab,unk", [(["<pad>", "<unk>", "move"], 1),
+                                      (["<pad>", "move", "<unk>"], 2),
+                                      (["<pad>", "move"], 0)])
+def test_inference_oov_reuses_reserved_id(vocab, unk):
+    tok = dict(vocab=vocab, length=3)
+    ids = tl.tokenize(["MOVE novel", "alien alien alien alien"], tok, truncate=True)
+    np.testing.assert_array_equal(ids, [[vocab.index("move"), unk, 0], [unk] * 3])
+    assert ids.dtype == np.int64 and tok == dict(vocab=vocab, length=3)
+
+
+def test_inference_spatial_tokens_are_bit_identical():
+    texts = [f"pick up the black bowl {position} the {object} and place it on the plate"
+             for position in ("between", "next to")
+             for object in ("plate", "ramekin", "cookie box", "stove", "wooden cabinet")]
+    tok = tl.tokenizer(texts)
+    # Original encoding: exact word IDs, zero padding, saved length/dtype.
+    lookup = {w: i for i, w in enumerate(tok["vocab"])}
+    expected = np.zeros((len(texts), tok["length"]), dtype=np.int64)
+    for i, text in enumerate(texts):
+        ids = [lookup.get(w, 1) for w in tl.words(text)]
+        expected[i, :len(ids)] = ids
+    for truncate in (False, True):
+        actual = tl.tokenize(texts, tok, truncate=truncate)
+        assert actual.dtype == expected.dtype and actual.tobytes() == expected.tobytes()
+
+
+def test_inference_truncation_keeps_prefix_and_training_length_check():
+    tok = tl.tokenizer(["move mug left"])
+    text = "MOVE mug left past a plate"
+    np.testing.assert_array_equal(tl.tokenize([text], tok, truncate=True), tl.tokenize(["move mug left"], tok))
+    with pytest.raises(ValueError, match="exceeds saved tokenizer length"):
+        tl.tokenize([text], tok)
+
+
 def test_two_camera_forward_loss_and_cached_sampling():
     c = config()
     model = MicroVLA(c)
@@ -276,6 +310,25 @@ def fake_checkpoint(meta):
     c = config()
     c.vocab_size = len(meta["tokenizer"]["vocab"])
     return dict(config=asdict(c), model=MicroVLA(c).state_dict(), norm=meta["norm"], tokenizer=meta["tokenizer"], phase="train")
+
+
+def test_adapter_handles_zero_shot_text_and_reports_full_instruction_oov():
+    tok = tl.tokenizer(["move mug left"])
+    meta = dict(tokenizer=tok, norm={k: dict(center=[0.] * n, scale=[1.] * n)
+                                   for k, n in (("state", 8), ("action", 7))})
+    texts = ["move mug left", "MOVE alien mug beyond limit", "", "alien"]
+    raw = {key: np.zeros((4, 16, 16, 3), dtype=np.uint8) for key in tl.CAMERAS}
+    raw.update({"observation.state": np.zeros((4, 8), dtype=np.float32), "task": texts})
+    policy = tl.TinyPolicy(fake_checkpoint(meta), "cpu")
+    instr = policy.prepare(raw)[2]
+    lookup = {w: i for i, w in enumerate(tok["vocab"])}
+    expected = [[lookup["move"], lookup["mug"], lookup["left"]],
+                [lookup["move"], lookup["<unk>"], lookup["mug"]], [0, 0, 0], [lookup["<unk>"], 0, 0]]
+    torch.testing.assert_close(instr, torch.tensor(expected), atol=0, rtol=0)
+    assert [policy.instruction_tokenization(t) for t in texts] == [
+        dict(oov_fraction=0., truncated=False), dict(oov_fraction=.6, truncated=True),
+        dict(oov_fraction=0., truncated=False), dict(oov_fraction=1., truncated=False)]
+    assert tok == tl.tokenizer(["move mug left"])
 
 
 @pytest.mark.parametrize("ablation", ["blind", "no-wrist", "wrong-text", "no-state"])

@@ -271,6 +271,8 @@ def main():
                     env_pre, env_post = make_env_pre_post_processors(cfg, policy.config)
                 row, frames = episode(envs[task], policy, pre, post, env_pre, env_post, args.suite, task, init, steps, ordinal < args.videos, spec)
                 row.update(arm=arm, placement=config.removesuffix("+trim"), trim=config.endswith("+trim"), protocol=spec, model_identity=identity, inits_requested=args.inits)
+                if config == "tiny" or config.startswith("tiny-"):
+                    row["instruction_tokenization"] = policy.instruction_tokenization(row["task_text"])
                 append_row(path, row)  # Durable before video encoding or the next episode.
                 rows[arm, task, init] = row
                 print(json.dumps(row), flush=True)

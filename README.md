@@ -196,6 +196,16 @@ checkpoint path/SHA-256. A changed checkpoint cannot silently extend an existing
 arm. Summaries and plots accept the different model identities while requiring the
 same protocol, and old version-2/3 rows remain readable unchanged.
 
+The Spatial-trained checkpoint also accepts `--suite libero_object`, `libero_goal`,
+`libero_10` (or any supported suite) with `--arms tiny:10` for zero-shot evaluation;
+results go to `runs/libero_eval_<suite>.jsonl`. Only `tiny-wrong-text` requires Spatial.
+Inference maps unseen words to the saved `<unk>` ID (ID 0/padding if absent) and keeps
+only the first saved tokenizer-length words, without changing the vocabulary or weights.
+Training retains its length check, and in-vocabulary Spatial tokens are unchanged.
+Every new tiny JSONL row includes `instruction_tokenization.oov_fraction` (over all
+words before truncation; 0 for empty text) and `instruction_tokenization.truncated`.
+For `tiny-wrong-text`, these describe the substituted instruction.
+
 This revision's episode metadata has incorrect `data/file_index` values; preprocessing
 does not use them. Spatial episodes 1261–1692 are in `file-308.parquet` through
 `file-376.parquet`, and file 308 also contains unrelated episodes. Those files must be

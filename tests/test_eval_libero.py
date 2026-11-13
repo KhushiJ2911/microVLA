@@ -401,9 +401,10 @@ def test_duplicate_arms_rejected(tmp_path, monkeypatch):
     assert exc.value.code == 2 and not (tmp_path / "runs").exists()
 
 
-def test_wrong_text_rejects_other_suites_before_loading(tmp_path, monkeypatch):
+@pytest.mark.parametrize("suite", [s for s in ev.MAX_STEPS if s != "libero_spatial"])
+def test_wrong_text_rejects_other_suites_before_loading(tmp_path, monkeypatch, suite):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(ev.sys, "argv", ["eval_libero.py", "--suite", "libero_goal", "--arms", "tiny-wrong-text:10"])
+    monkeypatch.setattr(ev.sys, "argv", ["eval_libero.py", "--suite", suite, "--arms", "tiny-wrong-text:10"])
     with pytest.raises(SystemExit) as exc:
         ev.main()
     assert exc.value.code == 2 and not (tmp_path / "runs").exists()
@@ -620,13 +621,19 @@ def test_tiny_uses_same_rollout_seed_wait_queue_and_env_action_format(cpu_rollou
     assert policy.config.n_action_steps == 16
 
 
-@pytest.mark.parametrize("ablation", [None, "blind", "no-wrist", "wrong-text", "no-state"])
-def test_main_tiny_checkpoint_identity_resume_and_changed_hash(cpu_rollout, tmp_path, monkeypatch, ablation):
+@pytest.mark.parametrize("suite,ablation", [("libero_spatial", a) for a in
+                                          (None, "blind", "no-wrist", "wrong-text", "no-state")] +
+                                         [(s, None) for s in ev.MAX_STEPS if s != "libero_spatial"])
+def test_main_tiny_checkpoint_identity_resume_and_changed_hash(cpu_rollout, tmp_path, monkeypatch, suite, ablation):
     from dataclasses import asdict
     import hashlib
     import train_libero as tl
     import lerobot.envs.factory as factory
     env, *_ = cpu_rollout
+    if suite != "libero_spatial":
+        original_call = env.call
+        env.call = env.get_attr = lambda name: (("move unseen mug past the cup",)
+                                               if name == "task_description" else original_call(name))
     original_obs = env.obs
     def obs():
         batch = original_obs()
@@ -647,20 +654,23 @@ def test_main_tiny_checkpoint_identity_resume_and_changed_hash(cpu_rollout, tmp_
     torch.save(checkpoint, path)
     monkeypatch.chdir(tmp_path)
     arm = f"tiny-{ablation}:10" if ablation else "tiny:10"
-    monkeypatch.setattr(ev.sys, "argv", ["eval_libero.py", "--arms", arm, "--tiny-ckpt", str(path), "--inits", "1", "--max-steps", "12"])
+    monkeypatch.setattr(ev.sys, "argv", ["eval_libero.py", "--suite", suite, "--arms", arm, "--tiny-ckpt", str(path), "--inits", "1", "--max-steps", "12"])
     make_calls = []
-    monkeypatch.setattr(factory, "make_env", lambda *a, **kw: make_calls.append(1) or {"libero_spatial": {0: env}})
+    monkeypatch.setattr(factory, "make_env", lambda *a, **kw: make_calls.append(1) or {suite: {0: env}})
     monkeypatch.setattr(factory, "make_env_pre_post_processors", lambda *a: (tl.IdentityProcessor(), tl.IdentityProcessor()))
     real_policy, loaded = tl.TinyPolicy, []
     monkeypatch.setattr(tl, "TinyPolicy", lambda ckpt, **kw: loaded.append(kw) or real_policy(ckpt, "cpu", **kw))
     ev.main()
-    log = tmp_path / "runs/libero_eval_libero_spatial.jsonl"
+    log = tmp_path / f"runs/libero_eval_{suite}.jsonl"
     before = log.read_bytes()
     row = ev.read_rows(log)[arm, 0, 0]
     identity = dict(checkpoint_path=str(path), checkpoint_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
     if ablation:
         identity["ablation"] = ablation
     assert row["model_identity"] == identity
+    assert row["instruction_tokenization"] == dict(oov_fraction=0. if suite == "libero_spatial" else .5,
+                                                 truncated=suite != "libero_spatial")
+    assert row["protocol"]["suite"] == suite
     assert loaded == [{"ablation": ablation}]
     assert "policy" not in row["protocol"] and row["chunk_size"] == 16 and row["policy_calls"] == 3
     ev.main()
