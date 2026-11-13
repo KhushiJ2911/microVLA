@@ -105,3 +105,84 @@ def test_no_complete_pairs(sample, tmp_path, monkeypatch):
     monkeypatch.setattr(plotter.plt.Figure, "savefig", savefig)
     plotter.plot()
     assert "p=n/a (0 complete, 2 incomplete)" in titles[0]
+
+
+@pytest.fixture
+def all_suites(sample):
+    paths = {"libero_spatial": sample}
+    for suite in list(plotter.SUITES)[1:]:
+        paths[suite] = sample.with_name(f"libero_eval_{suite}.jsonl")
+        shutil.copyfile(ROOT / "runs" / paths[suite].name, paths[suite])
+    return paths
+
+
+@pytest.mark.parametrize("suite", list(plotter.SUITES)[1:])
+def test_suite_output_preserves_spatial(all_suites, tmp_path, monkeypatch, suite):
+    monkeypatch.chdir(tmp_path)
+    spatial = Path("assets/libero_results.png")
+    spatial.parent.mkdir()
+    spatial.write_bytes(b"existing Spatial figure")
+    original = all_suites[suite].read_bytes()
+    target = plotter.plot(suite)
+    assert target == Path(f"assets/libero_results_{suite}.png")
+    with Image.open(target) as image:
+        assert image.format == "PNG" and image.width == 2560
+    assert spatial.read_bytes() == b"existing Spatial figure"
+    assert all_suites[suite].read_bytes() == original
+
+
+@pytest.mark.parametrize("missing", [None, "libero_goal"])
+def test_all_suites(all_suites, tmp_path, monkeypatch, missing):
+    if missing:
+        all_suites.pop(missing).unlink()
+    # Ignore an unfinished append, without repairing the source file.
+    with all_suites["libero_spatial"].open("a") as stream:
+        stream.write('{"arm":')
+    originals = {suite: path.read_bytes() for suite, path in all_suites.items()}
+    monkeypatch.chdir(tmp_path)
+    figures = []
+    close = plotter.plt.close
+    monkeypatch.setattr(plotter.plt, "close", figures.append)
+    try:
+        target = plotter.plot_all()
+        assert target == Path("assets/libero_suites.png")
+        with Image.open(target) as image:
+            assert image.format == "PNG" and image.size == (1600, 960)
+        fig = figures[-1]
+        ax, = fig.axes
+        assert [t.get_text() for t in ax.get_xticklabels()] == [plotter.SUITES[s] for s in all_suites]
+        summaries = [plotter.read_suite(s)[1] for s in all_suites]
+        bars = [container for container in ax.containers if hasattr(container, "patches")]
+        assert len(bars) == 2
+        for arm, container in zip(("nf4+trim:5", "tiny:10"), bars):
+            for summary, bar, segment in zip(summaries, container.patches,
+                                              container.errorbar.lines[2][0].get_segments()):
+                values = summary["arms"][arm]
+                assert bar.get_height() == pytest.approx(100 * values["rate"])
+                assert segment[:, 1] == pytest.approx([100 * v for v in values["wilson95"]])
+        anchor = next(line for line in ax.lines if line.get_label() == "openpi published (external anchor)")
+        expected = dict(libero_spatial=98.8, libero_object=98.2, libero_goal=98.0, libero_10=92.4)
+        assert list(anchor.get_ydata()) == [expected[s] for s in all_suites]
+        assert anchor.get_marker() == "D" and anchor.get_linestyle() == "None"
+        assert "trained on Spatial only" in fig._supxlabel.get_text()
+        assert "Object / Goal / LIBERO-10 are zero-shot" in fig._supxlabel.get_text()
+        assert {suite: path.read_bytes() for suite, path in all_suites.items()} == originals
+    finally:
+        for fig in figures:
+            if hasattr(fig, "savefig"):
+                close(fig)
+
+
+def test_all_cli(all_suites, tmp_path):
+    result = subprocess.run([sys.executable, str(ROOT / "plot_libero.py"), "--all"],
+                            cwd=tmp_path, env={**os.environ, "PYTHONPATH": ""},
+                            capture_output=True, text=True, check=True)
+    assert "assets/libero_suites.png" in result.stdout
+    assert (tmp_path / "assets/libero_suites.png").is_file()
+    assert not (tmp_path / "assets/libero_results.png").exists()
+
+
+def test_all_no_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="No LIBERO suite JSONL files found"):
+        plotter.plot_all()

@@ -10,9 +10,10 @@ import matplotlib.pyplot as plt
 from eval_libero import MAX_STEPS, summarize, wilson
 
 COLORS = {"nf4+trim:10": "#4477AA", "nf4+trim:5": "#EE6677", "offload-3.5:10": "#228833"}
+SUITES = {"libero_spatial": "Spatial", "libero_object": "Object", "libero_goal": "Goal", "libero_10": "LIBERO-10"}
 
 
-def plot(suite="libero_spatial"):
+def read_suite(suite):
     path = Path(f"runs/libero_eval_{suite}.jsonl")
     # Read only: the coordinator may be appending an episode while we plot.
     rows = [json.loads(line) for line in path.read_text().splitlines(keepends=True) if line.endswith("\n")]
@@ -21,6 +22,11 @@ def plot(suite="libero_spatial"):
     summary = summarize(rows)
     if summary["protocol"]["suite"] != suite:
         raise ValueError(f"Saved protocol does not match {suite}")
+    return rows, summary
+
+
+def plot(suite="libero_spatial"):
+    rows, summary = read_suite(suite)
     arms = list(summary["arms"])
     values = list(summary["arms"].values())
     colors = [COLORS.get(a, plt.get_cmap("tab10")(i)) for i, a in enumerate(arms)]
@@ -68,7 +74,50 @@ def plot(suite="libero_spatial"):
     latency.margins(y=.6 if len(arms) > 4 else .2)
     for ax in (success, latency):
         ax.tick_params(axis="x", labelrotation=45 if len(arms) > 4 else 15)
-    target = Path("assets/libero_results.png")
+    suffix = "" if suite == "libero_spatial" else f"_{suite}"
+    target = Path(f"assets/libero_results{suffix}.png")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(target, dpi=160)
+    plt.close(fig)
+    return target
+
+
+def plot_all():
+    summaries = {}
+    for suite in SUITES:
+        try:
+            _, summaries[suite] = read_suite(suite)
+        except FileNotFoundError:
+            continue
+    if not summaries:
+        raise ValueError("No LIBERO suite JSONL files found")
+    fig, ax = plt.subplots(figsize=(10, 6), layout="constrained")
+    fig.suptitle("All LIBERO suites", fontsize=14)
+    width = .34
+    for i, (arm, label, color) in enumerate([
+        ("nf4+trim:5", "pi0.5 nf4+trim:5", COLORS["nf4+trim:5"]),
+        ("tiny:10", "tiny:10", "#4477AA"),
+    ]):
+        selected = [(x, s["arms"][arm]) for x, s in enumerate(summaries.values()) if arm in s["arms"]]
+        rates = [100 * v["rate"] for _, v in selected]
+        errors = [[max(0, rate - 100 * v["wilson95"][0]) for rate, (_, v) in zip(rates, selected)],
+                  [max(0, 100 * v["wilson95"][1] - rate) for rate, (_, v) in zip(rates, selected)]]
+        bars = ax.bar([x + (i - .5) * width for x, _ in selected], rates, width,
+                      color=color, yerr=errors, capsize=5, label=label)
+        for bar, (_, v) in zip(bars, selected):
+            ax.annotate(f"{v['successes']}/{v['episodes']}",
+                        (bar.get_x() + bar.get_width() / 2, 100 * v["wilson95"][1]),
+                        xytext=(0, 5), textcoords="offset points", ha="center", fontsize=9)
+    anchors = [s["external_sanity_anchor"]["success_percent"][suite] for suite, s in summaries.items()]
+    ax.plot(range(len(summaries)), anchors, "D", color="0.2", markersize=6,
+            label="openpi published (external anchor)")
+    ax.set(ylabel="Success (%) · 95% Wilson CI", ylim=(0, 112),
+           xticks=range(len(summaries)), xticklabels=[SUITES[s] for s in summaries])
+    ax.legend(loc="upper center", bbox_to_anchor=(.5, 1.1), ncol=3, fontsize=9)
+    fig.supxlabel("Tiny trained on Spatial only; Object / Goal / LIBERO-10 are zero-shot.\n"
+                  "Bar labels: successes/episodes. External anchors use a different checkpoint/framework; not paired.",
+                  fontsize=9)
+    target = Path("assets/libero_suites.png")
     target.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(target, dpi=160)
     plt.close(fig)
@@ -77,8 +126,11 @@ def plot(suite="libero_spatial"):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--suite", choices=list(MAX_STEPS), default="libero_spatial")
-    print(plot(parser.parse_args().suite))
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--suite", choices=list(MAX_STEPS), default="libero_spatial")
+    mode.add_argument("--all", action="store_true", help="compare the four LIBERO suites")
+    args = parser.parse_args()
+    print(plot_all() if args.all else plot(args.suite))
 
 
 if __name__ == "__main__":

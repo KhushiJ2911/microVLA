@@ -87,7 +87,8 @@ rates (Spatial 98.8%, Object 98.2%, Goal 98.0%, LIBERO-10 92.4%) appear as an ex
 sanity anchor from a different checkpoint/framework, never as a paired comparison.
 
 Run `PYTHONPATH= /home/keyu/Documents/ChatGPT/Mujuco/.venv/bin/python plot_libero.py --suite libero_spatial`
-to write the three-panel results figure to `assets/libero_results.png`. On this laptop,
+to write the three-panel results figure to `assets/libero_results.png`. Other suites write
+`assets/libero_results_<suite>.png`. On this laptop,
 prefix evaluation commands with `__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json MUJOCO_EGL_DEVICE_ID=1 CUDA_VISIBLE_DEVICES=0,1`
 to render the simulator on the Intel iGPU without taking memory from the 4 GB NVIDIA
 card; NVIDIA EGL with the NF4 policy went out of memory.
@@ -205,6 +206,23 @@ Training retains its length check, and in-vocabulary Spatial tokens are unchange
 Every new tiny JSONL row includes `instruction_tokenization.oov_fraction` (over all
 words before truncation; 0 for empty text) and `instruction_tokenization.truncated`.
 For `tiny-wrong-text`, these describe the substituted instruction.
+
+### All LIBERO suites
+
+Tiny was trained on Spatial only; Object, Goal and LIBERO-10 are zero-shot.
+Cells show successes/episodes, success rate and 95% Wilson interval from the JSONL logs.
+The figure marks published openpi rates as external anchors (different checkpoint/framework; not paired).
+
+![All LIBERO suites](assets/libero_suites.png)
+
+| Suite | pi0.5 nf4+trim:5 | tiny:10 |
+|---|---|---|
+| Spatial | 98/100 · 98.0% (93.0–99.4%) | 75/100 · 75.0% (65.7–82.5%) |
+| Object | 99/100 · 99.0% (94.6–99.8%) | 0/100 · 0.0% (0.0–3.7%) |
+| Goal | 93/100 · 93.0% (86.3–96.6%) | 0/100 · 0.0% (0.0–3.7%) |
+| LIBERO-10 | 90/100 · 90.0% (82.6–94.5%) | 0/100 · 0.0% (0.0–3.7%) |
+
+Regenerate with `PYTHONPATH= /home/keyu/Documents/ChatGPT/Mujuco/.venv/bin/python plot_libero.py --all`.
 
 This revision's episode metadata has incorrect `data/file_index` values; preprocessing
 does not use them. Spatial episodes 1261–1692 are in `file-308.parquet` through
