@@ -65,15 +65,15 @@ environment postprocessors before stepping the simulator. The policy queue's
 the first requested actions of each full prediction. Every row records the effective
 `n_action_steps`, checkpoint `checkpoint_n_action_steps`, `chunk_size`, episode
 limit, requested init count, `arm`, `placement`, `trim`, and a `protocol` object containing
-the shared evaluation settings and checkpoint identity. `policy_calls` counts chunk predictions;
+the shared evaluation settings. Model identity is stored separately in each row. `policy_calls` counts chunk predictions;
 `mean_policy_latency_s` times synchronized chunk inference, excluding processors and
 noise generation/transfer. `wall_time_s` includes reset and the rollout, excluding
 model loading and video encoding.
 
 Each finished episode is appended and fsynced to `runs/libero_eval_<suite>.jsonl`.
 Restarting skips completed arm/task/init keys and repairs an unfinished final line.
-Existing version-2 NF4+trim rows are recognized without rewriting completed lines.
-Resume rejects changed protocol/checkpoint settings; archive the log
+Existing version-2/3 rows are normalized to version 4 in memory without rewriting completed lines.
+Resume rejects changed protocol settings or changed model identity within a requested arm; archive the log
 or run in another output directory when changing them. Increasing `--inits`, changing
 task selection, or requesting videos does not change the protocol.
 `--summary` summarizes all saved episodes without loading the policy or simulator:
@@ -99,6 +99,102 @@ cached for resumed pairing. Results are saved before encoding: a crash during en
 can leave a completed episode without a scene clip, which is reported without rerunning
 that episode. Exact init selection uses this installed LeRobot's private local
 `_envs[0].init_state_id`; its public reset API has no init-state selector.
+
+## Tiny model on LIBERO-Spatial
+
+`train_libero.py` imports the model, flow loss, cached sampler and bf16 autocast from
+`train.py`. The LIBERO configuration has **10,480,711 parameters**: two 96x96 cameras
+with a shared ViT and learned camera embeddings, 8 state values discretized into
+256 bins each, word tokens, and 16 relative 7-D actions per chunk. Evaluation executes
+the first 5 actions. The deterministic word vocabulary comes from all ten task strings;
+ID 0 is padding, ID 1 is unknown, and instructions are padded to the longest task.
+
+The cache selects episodes by exact language match with LIBERO's Spatial benchmark,
+then discovers local files by projecting only `episode_index`/`task_index` with PyArrow;
+unrelated episodes in mixed files are skipped. Expected source: `HuggingFaceVLA/libero` revision
+`86958911c0f959db2bbbdb107eb3e17c5f9c798e`, 432 episodes / 52,970 frames.
+Both embedded cameras are decoded with PIL bilinear resize into uint8 CHW memmaps.
+No additional flip is applied: the dataset and LeRobot's canonical observations already
+have the same orientation (LeRobot rotates simulator cameras by 180 degrees).
+Cache and inference use the same PIL resize. The state order is end-effector xyz,
+axis-angle xyz, and the two gripper positions. Commands stay in LIBERO's relative
+xyz/rotation/gripper convention; there is **no gripper sign inversion**. The adapter
+unnormalizes and clips commands to [-1,1], feeding the same LeRobot rollout and identity
+environment postprocessor used by the pretrained policy.
+
+The 96 px cache occupies **2,933,478,600 bytes** (2.93 GB / 2.73 GiB), plus a small JSON
+manifest. Preprocessing checks per-episode counts and task IDs before allocation, then
+validates frame IDs and decoded counts against metadata lengths. Missing or short
+episodes are listed in the error. It commits one parquet file at a time and safely
+replays an interrupted file, including episodes spanning files. Completed caches
+are reused; changed source/configuration is rejected. The split is by episode,
+approximately 5% held out per task. Training-only q01/q99 statistics map state/actions
+to roughly [-1,1]; statistics, tokenizer, configuration and cache fingerprint are saved
+in every checkpoint. Future chunks repeat the last action at the episode boundary.
+
+```bash
+# Use the existing venv; no downloads or installs.
+export PYTHONPATH=
+PY=/home/keyu/Documents/ChatGPT/Mujuco/.venv/bin/python
+
+# One-time preprocessing (restart the same command after interruption).
+"$PY" train_libero.py --preprocess
+
+# Cached SigLIP-B/16 -> shared ViT, then flow matching on Spatial actions.
+"$PY" train_libero.py
+# Resume either phase, including optimizer and RNG state.
+"$PY" train_libero.py --resume
+
+# After training, append tiny results to the existing paired evaluation log.
+"$PY" eval_libero.py --suite libero_spatial --inits 10 --arms tiny:10 \
+  --tiny-ckpt runs/libero_tiny/latest.pt --videos 4
+"$PY" plot_libero.py --suite libero_spatial
+```
+
+Defaults: 1,000 distillation steps at batch 16 (randomly selecting either camera),
+then 8,000 action-training steps at batch 32, horizon 16, AdamW at 3e-4, four-pixel
+random shifts on GPU, bf16 autocast, validation and atomic `latest.pt` every 250 steps.
+SigLIP is frozen, local-cache-only, and sees 192 px images to match the student's 12x12
+patch grid. Only the vision path receives pretrained-teacher supervision; language,
+backbone and action expert start from scratch. TensorBoard logs are in
+`runs/libero_tiny/tb`. Checkpoints preserve both training phases, the distillation head,
+optimizer, NumPy sampling RNG, and CPU/CUDA torch RNGs. Resume requires the same run
+settings; use another `--runs` for a different training schedule.
+
+The target runtime is **about 1.5–2.5 hours on the RTX 3050**, excluding preprocessing;
+the initial 2.13-hour estimate assumes 1.2 training steps/s and 1 distillation step/s.
+These are unmeasured estimates. Progress prints measured phase ETA, peak process RAM
+and peak allocated VRAM every 50 steps. Disk images stay mapped, copied batches are
+pinned for GPU transfer, and mapped image pages are released after each gather to keep
+host residency bounded. The RAM/VRAM targets still require a coordinator GPU run.
+`--compile` is optional and uses one compiler worker to limit host memory; eager mode
+is the default. The cache plus atomic checkpoint pair needs about 3.2 GB disk, excluding
+TensorBoard and videos. No intermediate model snapshots or teacher-feature cache accumulate.
+
+`tiny:<flow-steps>` uses the same environment creation, task/init selection, seed 7,
+10 wait steps, 220-step Spatial limit, replan 5, chunk seed function, video path,
+JSONL schema and synchronized model-only latency measurement as the pretrained arms.
+Noise shape follows the checkpoint (16x7 by default). Tiny preprocessing and action
+unnormalization sit outside the inference timer. Version 4 protocols contain only
+environment/eval settings; each row records either pretrained policy/revision or tiny
+checkpoint path/SHA-256. A changed checkpoint cannot silently extend an existing tiny
+arm. Summaries and plots accept the different model identities while requiring the
+same protocol, and old version-2/3 rows remain readable unchanged.
+
+This revision's episode metadata has incorrect `data/file_index` values; preprocessing
+does not use them. Spatial episodes 1261–1692 are in `file-308.parquet` through
+`file-376.parquet`, and file 308 also contains unrelated episodes. Those files must be
+present locally (use `--source PATH` for another snapshot). Missing episodes stop
+preprocessing before cache allocation.
+Real embedded camera bytes were successfully decoded; GPU training and a simulator
+rollout with trained weights have not been run here.
+
+Run all CPU checks with:
+
+```bash
+PYTHONPATH= PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  /home/keyu/Documents/ChatGPT/Mujuco/.venv/bin/python -m pytest -q tests/
+```
 
 ## Architecture (pi0.5, scaled down)
 

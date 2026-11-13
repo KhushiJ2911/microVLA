@@ -14,6 +14,8 @@ import torch.nn.functional as F
 
 @dataclass
 class Config:
+    image_size: int = 64
+    num_cameras: int = 1
     vocab_size: int = 32
     horizon: int = 10
     action_dim: int = 3
@@ -63,7 +65,7 @@ class Vision(nn.Module):
     def __init__(self, c: Config):
         super().__init__()
         self.patch = nn.Conv2d(3, c.vit_width, 8, stride=8)
-        self.position = nn.Parameter(torch.randn(1, 64, c.vit_width) * 0.02)
+        self.position = nn.Parameter(torch.randn(1, (c.image_size // 8) ** 2, c.vit_width) * 0.02)
         self.blocks = nn.ModuleList([
             nn.TransformerEncoderLayer(c.vit_width, c.vit_heads, 4 * c.vit_width,
                                        dropout=0, activation="gelu", batch_first=True,
@@ -154,6 +156,7 @@ class MicroVLA(nn.Module):
         super().__init__()
         self.config = config
         self.vision = Vision(config)
+        self.camera_embedding = nn.Parameter(torch.randn(config.num_cameras, 1, config.width) * 0.02) if config.num_cameras > 1 else None
         self.tokens = nn.Embedding(config.vocab_size + 256 * config.state_dim, config.width)
         nn.init.normal_(self.tokens.weight, std=0.02)
         self.layers = nn.ModuleList([JointBlock(config) for _ in range(config.depth)])
@@ -168,8 +171,13 @@ class MicroVLA(nn.Module):
         bins = ((state.clamp(-1, 1) + 1) * 128).long().clamp(max=255)
         ids = bins + c.vocab_size + 256 * torch.arange(c.state_dim, device=state.device)
         words = torch.cat((instr, ids), 1)
-        p = torch.cat((self.vision(images), self.tokens(words) * math.sqrt(c.width)), 1)
-        valid = torch.cat((torch.ones_like(p[:, :64, 0], dtype=torch.bool), instr != 0,
+        if self.camera_embedding is None:
+            visual = self.vision(images)
+        else:
+            visual = self.vision(images.flatten(0, 1)).unflatten(0, (images.shape[0], c.num_cameras))
+            visual = (visual + self.camera_embedding).flatten(1, 2)
+        p = torch.cat((visual, self.tokens(words) * math.sqrt(c.width)), 1)
+        valid = torch.cat((torch.ones_like(visual[:, :, 0], dtype=torch.bool), instr != 0,
                            torch.ones_like(ids, dtype=torch.bool)), 1)
         return p, valid
 

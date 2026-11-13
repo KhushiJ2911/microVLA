@@ -5,7 +5,7 @@ os.environ["MUJOCO_GL"] = "egl"  # Must precede every simulator import.
 MAX_STEPS = dict(libero_spatial=220, libero_object=280, libero_goal=300, libero_10=520, libero_90=400)
 SEED_SCHEME = "sha256(suite:task:init:chunk), first 4 bytes little-endian; CPU torch.Generator"
 def protocol(args):
-    return dict(version=3, suite=args.suite, replan=args.replan, env_seed=args.seed,
+    return dict(version=4, suite=args.suite, replan=args.replan, env_seed=args.seed,
                 max_episode_steps=args.max_steps or MAX_STEPS[args.suite], num_steps_wait=args.num_steps_wait,
                 no_op_action=[0, 0, 0, 0, 0, 0, -1], observation_height=args.observation_height,
                 observation_width=args.observation_width, fps=20, init_state_selection="episode index (0-based)",
@@ -14,8 +14,8 @@ def seed(suite, task, init, chunk):
     return int.from_bytes(hashlib.sha256(f"{suite}:{task}:{init}:{chunk}".encode()).digest()[:4], "little")
 
 def parse_arm(label):
-    if not re.fullmatch(r"(?:nf4|offload-\d+(?:\.\d+)?)(?:\+trim)?:[1-9]\d*", label):
-        raise argparse.ArgumentTypeError("arm must be nf4[+trim]:steps or offload-GiB[+trim]:steps")
+    if not re.fullmatch(r"(?:(?:nf4|offload-\d+(?:\.\d+)?)(?:\+trim)?|tiny):[1-9]\d*", label):
+        raise argparse.ArgumentTypeError("arm must be tiny:steps, nf4[+trim]:steps or offload-GiB[+trim]:steps")
     placement, steps = label.split(":")
     if placement.startswith("offload-") and float(placement.removeprefix("offload-").removesuffix("+trim")) <= 0:
         raise argparse.ArgumentTypeError("offload budget must be positive")
@@ -25,6 +25,13 @@ def normalize(row):
     spec = dict(row.get("protocol") or {})
     if spec.get("version") == 2 and (spec.get("placement"), spec.get("trim")) == ("nf4", True):
         spec.pop("placement"); spec.pop("trim"); spec["version"] = 3
+    if spec.get("version") == 3:
+        spec["version"] = 4
+    identity = {k: spec.pop(k) for k in ("policy", "revision") if k in spec}
+    if identity:
+        if row.get("model_identity", identity) != identity:
+            raise ValueError("Inconsistent model identity")
+        row["model_identity"] = identity
     label = parse_arm(row.get("arm", f"nf4+trim:{row['steps']}"))
     config = label.split(":")[0]
     placement, trim = config.removesuffix("+trim"), config.endswith("+trim")
@@ -76,12 +83,16 @@ def summarize(rows):
     rows = list(map(normalize, rows))
     protocols = {json.dumps(r.get("protocol"), sort_keys=True) for r in rows}
     if len(protocols) > 1 or "null" in protocols: raise ValueError("Summary has incompatible or missing protocols")
+    for arm in {r["arm"] for r in rows}:
+        identities = {json.dumps(r["model_identity"], sort_keys=True) for r in rows if r["arm"] == arm and r.get("model_identity")}
+        if len(identities) > 1: raise ValueError(f"Summary has incompatible model identities for {arm}")
     arms, tasks, episodes, comparisons = {}, {}, {}, {}
     for arm in sorted({r["arm"] for r in rows}):
         selected = [r for r in rows if r["arm"] == arm]
         n, wins, calls = len(selected), sum(r["success"] for r in selected), sum(r["policy_calls"] for r in selected)
         latency = sum(r["mean_policy_latency_s"] * r["policy_calls"] for r in selected)
         arms[arm] = dict(episodes=n, successes=wins, rate=wins / n, wilson95=wilson(wins, n),
+                         model_identity=next((r["model_identity"] for r in selected if r.get("model_identity")), None),
                          mean_policy_latency_s=latency / calls if calls else None)
     for r in rows:
         task = tasks.setdefault(str(r["task_id"]), {"task_text": r["task_text"], **{a: [0, 0] for a in arms}})
@@ -190,6 +201,7 @@ def main():
         parser.add_argument(f"--{flag}", type=int, default=default)
     parser.add_argument("--arms", nargs="+", type=parse_arm, default=["nf4+trim:10", "nf4+trim:5"])
     parser.add_argument("--tasks", nargs="+", type=int)
+    parser.add_argument("--tiny-ckpt", type=Path, default=Path("runs/libero_tiny/latest.pt"))
     parser.add_argument("--summary", action="store_true", help="summarize all persisted episodes without loading policy/env")
     parser.add_argument("--max-steps", "--episode-length", type=int, help="policy actions, excluding settling")
     args = parser.parse_args()
@@ -208,10 +220,26 @@ def main():
             if result.returncode: raise SystemExit(result.returncode)
         return
     import infer
-    spec = {**protocol(args), "policy": infer.POLICY, "revision": infer.REVISION}
+    spec = protocol(args)
     if any(r.get("protocol") != spec for r in rows.values()):
-        raise ValueError("Resume log has incompatible protocol/checkpoint metadata; archive it before changing settings")
+        raise ValueError("Resume log has incompatible protocol metadata; use another output directory when changing settings")
     config = next(iter(groups))
+    if config == "tiny":
+        import torch
+        from train_libero import TinyPolicy, IdentityProcessor
+        digest = hashlib.sha256()
+        with args.tiny_ckpt.open("rb") as f:
+            for block in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(block)
+            f.seek(0)  # Hash and load the same inode even if training atomically replaces latest.pt.
+            tiny_checkpoint = torch.load(f, map_location="cpu", weights_only=True)
+        if tiny_checkpoint.get("phase") != "train":
+            raise ValueError("Tiny checkpoint has not completed any action training")
+        identity = dict(checkpoint_path=str(args.tiny_ckpt.resolve()), checkpoint_sha256=digest.hexdigest())
+    else:
+        identity = dict(policy=infer.POLICY, revision=infer.REVISION)
+    if any(r.get("model_identity", identity) != identity for r in rows.values() if r["arm"] in args.arms):
+        raise ValueError("Resume log has incompatible model identity for a requested arm")
     try: preflight(config)
     except infer.OffloadRAMError as exc:
         print(f"Offload RAM preflight refused before GPU/env initialization: {exc}. Completed JSONL episodes are preserved.", flush=True)
@@ -230,10 +258,15 @@ def main():
                 steps = int(arm.split(":")[1])
                 if (arm, task, init) in rows: continue
                 if policy is None:
-                    policy, pre, post, _ = infer.load_policy(config.removesuffix("+trim"), trim=config.endswith("+trim"))
+                    if config == "tiny":
+                        policy = TinyPolicy(tiny_checkpoint)
+                        del tiny_checkpoint
+                        pre, post = IdentityProcessor(), IdentityProcessor()
+                    else:
+                        policy, pre, post, _ = infer.load_policy(config.removesuffix("+trim"), trim=config.endswith("+trim"))
                     env_pre, env_post = make_env_pre_post_processors(cfg, policy.config)
                 row, frames = episode(envs[task], policy, pre, post, env_pre, env_post, args.suite, task, init, steps, ordinal < args.videos, spec)
-                row.update(arm=arm, placement=config.removesuffix("+trim"), trim=config.endswith("+trim"), protocol=spec, inits_requested=args.inits)
+                row.update(arm=arm, placement=config.removesuffix("+trim"), trim=config.endswith("+trim"), protocol=spec, model_identity=identity, inits_requested=args.inits)
                 append_row(path, row)  # Durable before video encoding or the next episode.
                 rows[arm, task, init] = row
                 print(json.dumps(row), flush=True)

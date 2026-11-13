@@ -8,6 +8,7 @@ import pytest
 import torch
 
 import eval_libero as ev
+from train import Config, MicroVLA
 
 
 def protocol(**overrides):
@@ -323,10 +324,11 @@ def test_main_protocol_defaults_and_overrides_and_extend_to_50(tmp_path, monkeyp
     assert spec["num_steps_wait"] == (0 if override else 10)
     assert spec["no_op_action"] == [0] * 6 + [-1]
     assert cfg.init_states and cfg.hard_reset and spec["official_inits_per_task"] == 50
-    assert spec["policy"] == infer.POLICY and spec["revision"] == infer.REVISION
+    assert "policy" not in spec and "revision" not in spec
     monkeypatch.setattr(ev.argparse._sys, "argv", command + ["--inits", "50"])
     ev.main()
     saved = ev.read_rows(path)
+    assert saved["nf4+trim:10", 0, 0]["model_identity"] == dict(policy=infer.POLICY, revision=infer.REVISION)
     assert len(saved) == 100 and path.read_bytes().startswith(initial)
     assert saved["nf4+trim:5", 0, 9]["inits_requested"] == 10 and saved["nf4+trim:5", 0, 49]["inits_requested"] == 50
     summary = json.loads(path.with_name(path.stem + "_summary.json").read_text())
@@ -569,3 +571,80 @@ def test_reference_pass_resumes_per_arm_and_combines_summary(tmp_path, monkeypat
     summary = json.loads(path.with_name(path.stem + "_summary.json").read_text())
     assert len(summary["arms"]) == len(summary["paired"]) == 3
     assert all(p["complete_pairs"] == 2 for p in summary["paired"].values())
+
+
+def test_tiny_uses_same_rollout_seed_wait_queue_and_env_action_format(cpu_rollout):
+    from dataclasses import asdict
+    from train_libero import TinyPolicy, IdentityProcessor, tokenizer
+    env, _, _, _, env_pre, env_post = cpu_rollout
+    original_obs = env.obs
+    def obs():
+        batch = original_obs()
+        batch["observation.images.image2"] = batch["observation.images.image"].copy()
+        return batch
+    env.obs = obs
+    c = Config(image_size=16, num_cameras=2, vocab_size=6, horizon=16, state_dim=8, action_dim=7,
+               width=32, depth=1, heads=2, head_dim=8, mlp=64, expert_width=16, expert_mlp=32,
+               vit_width=16, vit_depth=1, vit_heads=2)
+    norm = {k: dict(center=[0.] * n, scale=[1.] * n) for k, n in (("state", 8), ("action", 7))}
+    policy = TinyPolicy(dict(config=asdict(c), model=MicroVLA(c).state_dict(), norm=norm,
+                             tokenizer=tokenizer(["move the mug"])), "cpu")
+    # LIBERO's actual default processors are identity (the fixture's postprocessor adds 3).
+    processors = [IdentityProcessor() for _ in range(4)]
+    calls = []
+    original_predict = policy.predict_action_chunk
+    def predict(batch, **kw):
+        calls.append(kw["noise"].clone())
+        assert "tiny_inputs" in batch  # Preprocessing occurs before the latency timer.
+        assert kw["noise"].shape == (1, 16, 7)
+        return original_predict(batch, **kw)
+    policy.predict_action_chunk = predict
+    result, frames = ev.episode(env, policy, *processors, "libero_spatial", 2, 1, 2, True, protocol())
+    assert result["policy_calls"] == 3 and result["n_action_steps"] == 5 and result["chunk_size"] == 16
+    assert env.waits == [10] and env.resets == [(1, [7])] and len(frames) == 13
+    assert all(a.shape == (1, 7) and np.isfinite(a).all() and np.abs(a).max() <= 1 for a in env.actions)
+    expected = torch.randn(1, 16, 7, generator=torch.Generator().manual_seed(ev.seed("libero_spatial", 2, 1, 0)))
+    torch.testing.assert_close(calls[0], expected)
+    assert policy.config.n_action_steps == 16
+
+
+def test_main_tiny_checkpoint_identity_resume_and_changed_hash(cpu_rollout, tmp_path, monkeypatch):
+    from dataclasses import asdict
+    import hashlib
+    import train_libero as tl
+    import lerobot.envs.factory as factory
+    env, *_ = cpu_rollout
+    original_obs = env.obs
+    def obs():
+        batch = original_obs()
+        batch["observation.images.image2"] = batch["observation.images.image"].copy()
+        return batch
+    env.obs, env.close = obs, lambda: None
+    c = Config(image_size=16, num_cameras=2, vocab_size=6, horizon=16, state_dim=8, action_dim=7,
+               width=32, depth=1, heads=2, head_dim=8, mlp=64, expert_width=16, expert_mlp=32,
+               vit_width=16, vit_depth=1, vit_heads=2)
+    checkpoint = dict(config=asdict(c), model=MicroVLA(c).state_dict(), phase="train",
+                      norm={k: dict(center=[0.] * n, scale=[1.] * n) for k, n in (("state", 8), ("action", 7))},
+                      tokenizer=tl.tokenizer(["move the mug"]))
+    path = tmp_path / "tiny.pt"
+    torch.save(checkpoint, path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ev.sys, "argv", ["eval_libero.py", "--arms", "tiny:10", "--tiny-ckpt", str(path), "--inits", "1", "--max-steps", "12"])
+    make_calls = []
+    monkeypatch.setattr(factory, "make_env", lambda *a, **kw: make_calls.append(1) or {"libero_spatial": {0: env}})
+    monkeypatch.setattr(factory, "make_env_pre_post_processors", lambda *a: (tl.IdentityProcessor(), tl.IdentityProcessor()))
+    real_policy, loaded = tl.TinyPolicy, []
+    monkeypatch.setattr(tl, "TinyPolicy", lambda ckpt: loaded.append(1) or real_policy(ckpt, "cpu"))
+    ev.main()
+    log = tmp_path / "runs/libero_eval_libero_spatial.jsonl"
+    before = log.read_bytes()
+    row = ev.read_rows(log)["tiny:10", 0, 0]
+    assert row["model_identity"] == dict(checkpoint_path=str(path), checkpoint_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    assert "policy" not in row["protocol"] and row["chunk_size"] == 16 and row["policy_calls"] == 3
+    ev.main()
+    assert log.read_bytes() == before and len(loaded) == 1
+    checkpoint["step"] = 999
+    torch.save(checkpoint, path)
+    with pytest.raises(ValueError, match="incompatible model identity"):
+        ev.main()
+    assert len(make_calls) == 2 and log.read_bytes() == before

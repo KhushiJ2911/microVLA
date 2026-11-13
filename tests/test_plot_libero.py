@@ -10,9 +10,10 @@ from PIL import Image
 import pytest
 
 import plot_libero as plotter
+from eval_libero import normalize
 
 ROOT = Path(__file__).resolve().parents[1]
-ARMS = list(plotter.COLORS)
+ARMS = [*plotter.COLORS, "tiny:10"]
 
 
 @pytest.fixture
@@ -23,7 +24,7 @@ def sample(tmp_path):
     return target
 
 
-@pytest.mark.parametrize("n_arms", [1, 2, 3])
+@pytest.mark.parametrize("n_arms", [1, 2, 3, 4])
 def test_render_synthetic_arms(sample, tmp_path, monkeypatch, n_arms):
     template = json.loads(sample.read_text().splitlines()[0])
     rows = []
@@ -34,6 +35,9 @@ def test_render_synthetic_arms(sample, tmp_path, monkeypatch, n_arms):
                        trim="+trim" in arm, steps=int(arm.split(":")[1]),
                        init_index=init, task_id=0, success=(init == i), episode_length=20 + 10 * init,
                        policy_calls=calls, mean_policy_latency_s=seconds)
+            if arm == "tiny:10":
+                row = normalize(row)
+                row["model_identity"] = dict(checkpoint_path="tiny.pt", checkpoint_sha256="synthetic")
             rows.append(row)
     # Only the first arm has task 9: every comparison involving it is incomplete.
     rows.append({**rows[0], "task_id": 9, "episode_length": 40})
