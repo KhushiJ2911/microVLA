@@ -1,6 +1,7 @@
-"""Offline, bounded-memory LIBERO-Spatial cache, SigLIP distillation and MicroVLA training."""
+"""Disk-bounded LIBERO-Spatial preprocessing, SigLIP distillation and MicroVLA training."""
 import argparse
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import asdict
 import hashlib
 import io
@@ -10,6 +11,7 @@ import mmap
 import os
 from pathlib import Path
 import resource
+import shutil
 import time
 from types import SimpleNamespace
 
@@ -22,6 +24,7 @@ import torch.nn.functional as F
 from train import Config, MicroVLA, autocast, parameter_counts
 
 REVISION = "86958911c0f959db2bbbdb107eb3e17c5f9c798e"
+REPO = "HuggingFaceVLA/libero"
 DATASET = Path.home() / f".cache/huggingface/hub/datasets--HuggingFaceVLA--libero/snapshots/{REVISION}"
 CAMERAS = ("observation.images.image", "observation.images.image2")
 
@@ -102,20 +105,69 @@ def unnormalize(x, stats):
     return x * x.new_tensor(stats["scale"]) + x.new_tensor(stats["center"])
 
 
-def preprocess(source=DATASET, cache="runs/libero_cache", image_size=96, task_texts=None, seed=0):
+class StreamingSource:
+    """Range-read scalar columns; keep at most one full parquet on disk."""
+    def __init__(self, cache):
+        from huggingface_hub import HfFileSystem
+        self.fs = HfFileSystem()
+        self.root = f"datasets/{REPO}@{REVISION}/"
+        self.scratch = Path(cache) / ".stream-source"
+        # Includes partial downloads left by a killed process. Never use the shared HF cache.
+        if self.scratch.exists():
+            shutil.rmtree(self.scratch)
+
+    def glob(self, pattern):
+        return sorted(p.removeprefix(self.root) for p in self.fs.glob(self.root + pattern))
+
+    @contextmanager
+    def open(self, file, download=False):
+        if not download:
+            # No fsspec read-ahead or Arrow pre-buffering of image columns.
+            with self.fs.open(self.root + file, "rb", cache_type="none", block_size=64 * 1024) as f:
+                yield f
+            return
+        from huggingface_hub import constants, hf_hub_download
+        # Use HTTP streaming: Xet can add persistent chunk caches and large buffers.
+        previous_xet = constants.HF_HUB_DISABLE_XET
+        constants.HF_HUB_DISABLE_XET = True
+        try:
+            path = hf_hub_download(REPO, file, repo_type="dataset", revision=REVISION,
+                                   local_dir=self.scratch)
+            with Path(path).open("rb") as f:
+                yield f
+        finally:
+            constants.HF_HUB_DISABLE_XET = previous_xet
+            if self.scratch.exists():
+                shutil.rmtree(self.scratch)
+
+
+def preprocess(source=DATASET, cache="runs/libero_cache", image_size=96, task_texts=None, seed=0, stream=False):
     """Commit progress per source parquet. Interrupted files are safely replayed in place."""
     import pyarrow.parquet as pq
     source, cache = Path(source), Path(cache)
+    remote = StreamingSource(cache) if stream else None
+    def paths(pattern):
+        return remote.glob(pattern) if remote else sorted(p.relative_to(source).as_posix() for p in source.glob(pattern))
+
+    def batches(file, columns=None, download=False):
+        handle = remote.open(file, download) if remote else (source / file).open("rb")
+        with handle as f, pq.ParquetFile(f, pre_buffer=False) as parquet:
+            yield from parquet.iter_batches(batch_size=32, columns=columns, use_threads=False)
+
+    def metadata(file, columns=None):
+        handle = remote.open(file) if remote else (source / file).open("rb")
+        with handle as f:
+            return pq.read_table(f, columns=columns, use_threads=False, pre_buffer=False).to_pylist()
+
     texts = spatial_tasks() if task_texts is None else task_texts
-    tasks = {r["task_index"]: r["__index_level_0__"] for r in pq.read_table(source / "meta/tasks.parquet").to_pylist()}
+    tasks = {r["task_index"]: r["__index_level_0__"] for r in metadata("meta/tasks.parquet")}
     selected = {i: texts.index(t) for i, t in tasks.items() if t in texts}
     if set(tasks[i] for i in selected) != set(texts):
         raise ValueError("Dataset is missing Spatial task languages")
     episodes = []
     columns = ["episode_index", "tasks", "length"]
-    for path in sorted((source / "meta/episodes").rglob("*.parquet")):
-        episodes.extend(r for r in pq.read_table(path, columns=columns).to_pylist()
-                        if len(r["tasks"]) == 1 and r["tasks"][0] in texts)
+    for file in paths("meta/episodes/**/*.parquet"):
+        episodes.extend(r for r in metadata(file, columns) if len(r["tasks"]) == 1 and r["tasks"][0] in texts)
     episodes.sort(key=lambda r: r["episode_index"])
     if not episodes or len({r["episode_index"] for r in episodes}) != len(episodes):
         raise ValueError("Missing or duplicate episodes")
@@ -137,31 +189,30 @@ def preprocess(source=DATASET, cache="runs/libero_cache", image_size=96, task_te
         if bad:
             raise ValueError(f"Spatial episode frame count mismatch {stage} (episode: found/expected): " + "; ".join(bad))
 
-    # Episode metadata has unreliable data/file_index values. Discover local files
+    # Episode metadata has unreliable data/file_index values. Discover source files
     # using scalar column projection only; unrelated suites need no image reads.
     files, counts = {}, {}
-    for path in sorted((source / "data").rglob("*.parquet")):
+    for file in paths("data/**/*.parquet"):
         found = {}
-        for batch in pq.ParquetFile(path).iter_batches(columns=["episode_index", "task_index"]):
+        for batch in batches(file, ["episode_index", "task_index"]):
             for r in batch.to_pylist():
                 i = r["episode_index"]
                 if i not in by_id:
                     continue
                 if tasks.get(r["task_index"]) != by_id[i]["tasks"][0]:
-                    raise ValueError(f"Task mismatch for Spatial episode {i} in {path}")
+                    raise ValueError(f"Task mismatch for Spatial episode {i} in {file}")
                 found[i] = found.get(i, 0) + 1
                 counts[i] = counts.get(i, 0) + 1
         if found:
-            files[path.relative_to(source).as_posix()] = found
+            files[file] = found
     validate_counts(counts, "before decoding")
-    identity = dict(version=2, source=str(source.resolve()), image_size=image_size, frames=offset,
+    identity = dict(version=2, source=remote.root if remote else str(source.resolve()), image_size=image_size, frames=offset,
                     tasks=texts, episodes=episodes, seed=seed,
-                    files={p: {"bytes": (source / p).stat().st_size, "mtime_ns": (source / p).stat().st_mtime_ns} for p in files})
+                    files={p: {"bytes": remote.fs.size(remote.root + p)} if remote else
+                           {"bytes": (source / p).stat().st_size, "mtime_ns": (source / p).stat().st_mtime_ns} for p in files})
     needed = sum(np.dtype(d).itemsize * math.prod(s) for d, s in array_specs(offset, image_size).values())
-    if needed > 3_000_000_000:
-        raise ValueError(f"Cache needs {needed:,} bytes; use <=96 px for the 3 GB budget")
-    cache.mkdir(parents=True, exist_ok=True)
     path = cache / "manifest.json"
+    manifest = None
     if path.exists():
         manifest = json.loads(path.read_text())
         if manifest["identity"] != identity:
@@ -171,7 +222,19 @@ def preprocess(source=DATASET, cache="runs/libero_cache", image_size=96, task_te
                 raise ValueError(f"Incomplete cache allocation: {name}")
         if manifest.get("complete"):
             return manifest
-    else:
+    # Account for physical blocks already allocated by an interrupted build, not
+    # sparse file lengths. A resume must not require room for a second cache.
+    allocated = sum((cache / f"{k}.bin").stat().st_blocks * 512 for k in array_specs(offset, image_size)) if manifest else 0
+    required = max(0, needed - allocated) + 2**30
+    parent = cache
+    while not parent.exists():
+        parent = parent.parent
+    free = shutil.disk_usage(parent).free
+    if free < required:
+        raise ValueError(f"Insufficient free disk for cache: need {required:,} bytes "
+                         f"(cache {needed:,}, already allocated {allocated:,}, plus 1 GiB); have {free:,}")
+    cache.mkdir(parents=True, exist_ok=True)
+    if manifest is None:
         for name, (dtype, shape) in array_specs(offset, image_size).items():
             with (cache / f"{name}.bin").open("wb") as f:
                 f.truncate(np.dtype(dtype).itemsize * math.prod(shape))
@@ -186,7 +249,7 @@ def preprocess(source=DATASET, cache="runs/libero_cache", image_size=96, task_te
         if not completed:
             columns += [*CAMERAS, "observation.state", "action"]
         # Reconstruct seen frames for committed files without decoding them again.
-        for batch in pq.ParquetFile(source / file).iter_batches(batch_size=32, columns=columns):
+        for batch in batches(file, columns, download=not completed):
             for r in batch.to_pylist():
                 ep = by_id.get(r["episode_index"])
                 if ep is None:
@@ -204,6 +267,10 @@ def preprocess(source=DATASET, cache="runs/libero_cache", image_size=96, task_te
                 seen[index] = True
                 decoded[r["episode_index"]] = decoded.get(r["episode_index"], 0) + 1
                 file_decoded[r["episode_index"]] = file_decoded.get(r["episode_index"], 0) + 1
+            if not completed:
+                # Bound resident image pages even when a source file is large.
+                arrays["images"].flush()
+                release_pages(arrays["images"])
         validate_counts(file_decoded, f"after decoding {file}", files[file])
         if completed:
             continue
@@ -406,8 +473,9 @@ class TinyPolicy(nn.Module):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preprocess", action="store_true", help="only build/resume the disk cache")
-    parser.add_argument("--source", type=Path, default=DATASET)
-    parser.add_argument("--cache", type=Path, default=Path("runs/libero_cache"))
+    parser.add_argument("--stream", action="store_true", help="preprocess pinned HF dataset one parquet at a time")
+    parser.add_argument("--source", type=Path, default=DATASET, help="local source (without --stream)")
+    parser.add_argument("--cache", type=Path, help="default: runs/libero_cache; streaming: runs/libero_cache_<image-size>")
     parser.add_argument("--runs", type=Path, default=Path("runs/libero_tiny"))
     parser.add_argument("--image-size", type=int, default=96)
     parser.add_argument("--horizon", type=int, default=16)
@@ -424,6 +492,10 @@ def main():
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
+    if args.stream and not args.preprocess:
+        parser.error("--stream requires --preprocess")
+    if args.cache is None:
+        args.cache = Path(f"runs/libero_cache_{args.image_size}" if args.stream else "runs/libero_cache")
     if min(args.batch_size, args.distill_batch_size, args.horizon, args.lr) <= 0 or min(args.steps, args.distill_steps) < 0:
         parser.error("batch sizes, horizon and lr must be positive; steps must be nonnegative")
     if args.ema is not None and not 0 <= args.ema < 1:
@@ -431,7 +503,7 @@ def main():
     if args.save_every < 0:
         parser.error("--save-every must be nonnegative")
     if args.preprocess:
-        meta = preprocess(args.source, args.cache, args.image_size, seed=args.seed)
+        meta = preprocess(args.source, args.cache, args.image_size, seed=args.seed, stream=args.stream)
         print(json.dumps({k: meta[k] for k in ("frames", "cache_bytes", "image_size", "val_episodes")}))
         return
     torch.set_num_threads(4)

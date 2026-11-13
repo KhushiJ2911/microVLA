@@ -1,5 +1,6 @@
 import io
 import json
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -200,6 +201,147 @@ def test_cache_rejects_changed_configuration(source):
     build(source)
     with pytest.raises(ValueError, match="changed"):
         tl.preprocess(source[0], source[1], 24, source[2])
+
+
+@pytest.fixture
+def remote_source(source, monkeypatch):
+    """Exercise the real streaming adapter without any network or shared HF cache."""
+    import huggingface_hub as hub
+    root, cache, _ = source
+    prefix = f"datasets/{tl.REPO}@{tl.REVISION}/"
+    downloads, projections = [], []
+    class FileSystem:
+        def glob(self, pattern):
+            assert pattern.startswith(prefix)
+            return [prefix + p.relative_to(root).as_posix() for p in root.glob(pattern[len(prefix):])]
+        def size(self, path):
+            return (root / path.removeprefix(prefix)).stat().st_size
+        def open(self, path, mode, **kwargs):
+            assert kwargs == dict(cache_type="none", block_size=64 * 1024)
+            return (root / path.removeprefix(prefix)).open(mode)
+    def download(repo, file, *, repo_type, revision, local_dir):
+        assert (repo, repo_type, revision) == (tl.REPO, "dataset", tl.REVISION)
+        assert hub.constants.HF_HUB_DISABLE_XET
+        assert local_dir == cache / ".stream-source" and not local_dir.exists()
+        downloads.append(file)
+        target = local_dir / file
+        target.parent.mkdir(parents=True)
+        shutil.copyfile(root / file, target)
+        return str(target)
+    original = pq.ParquetFile.iter_batches
+    def tracked(self, *args, **kwargs):
+        projections.append(kwargs["columns"])
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(hub, "HfFileSystem", FileSystem)
+    monkeypatch.setattr(hub, "hf_hub_download", download)
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", tracked)
+    return downloads, projections
+
+
+def test_stream_matches_local_arrays_and_metadata_at_128(source, remote_source, monkeypatch):
+    root, cache, texts = source
+    # An episode can span files, and physical row order need not be frame order.
+    first, second = [root / f"data/chunk-000/file-{i}.parquet" for i in (308, 309)]
+    rows = pq.read_table(first).to_pylist()
+    moved = rows.pop()
+    pq.write_table(pa.Table.from_pylist(rows[::-1]), first)
+    pq.write_table(pa.Table.from_pylist([moved, *pq.read_table(second).to_pylist()][::-1]), second)
+    local_cache = cache.with_name("local-cache")
+    local = tl.preprocess(root, local_cache, 128, texts)
+    downloads, projections = remote_source
+    projections.clear()
+    streamed = tl.preprocess(cache=cache, image_size=128, task_texts=texts, stream=True)
+    assert projections[:3] == [["episode_index", "task_index"]] * 3
+    assert downloads == [f"data/chunk-000/file-{i}.parquet" for i in (308, 309)]
+    assert not (cache / ".stream-source").exists()
+    for key in tl.array_specs(24, 128):
+        assert (cache / f"{key}.bin").read_bytes() == (local_cache / f"{key}.bin").read_bytes()
+    for key in ("frames", "image_size", "completed_files", "complete", "val_episodes", "norm", "tokenizer", "cache_bytes"):
+        assert streamed[key] == local[key]
+    assert streamed["identity"]["episodes"] == local["identity"]["episodes"]
+    assert streamed["identity"]["source"] == f"datasets/{tl.REPO}@{tl.REVISION}/"
+    data = tl.Batches(cache, 4)
+    assert data.batch(2, torch.device("cpu"))[0].shape == (2, 2, 3, 128, 128)
+    downloads.clear()
+    monkeypatch.setattr(tl, "decode_image", lambda *a: pytest.fail("complete cache decoded again"))
+    assert tl.preprocess(cache=cache, image_size=128, task_texts=texts, stream=True) == streamed
+    assert not downloads
+
+
+@pytest.mark.parametrize("stage", ["download", "decode", "commit"])
+def test_stream_resume_skips_finished_downloads_and_cleans_partial(source, remote_source, monkeypatch, stage):
+    import huggingface_hub as hub
+    _, cache, texts = source
+    original_decode, original_download, original_json = tl.decode_image, hub.hf_hub_download, tl.atomic_json
+    downloads, projections = remote_source
+    calls = []
+    def decode(*args):
+        calls.append(1)
+        if stage == "decode" and len(calls) == 26:
+            raise KeyboardInterrupt
+        return original_decode(*args)
+    def download(*args, **kwargs):
+        path = original_download(*args, **kwargs)
+        if stage == "download" and len(downloads) == 2:
+            Path(path).with_suffix(".incomplete").write_bytes(b"partial")
+            raise KeyboardInterrupt
+        return path
+    def commit(path, manifest):
+        if stage == "commit" and len(manifest["completed_files"]) == 2:
+            raise KeyboardInterrupt
+        return original_json(path, manifest)
+    monkeypatch.setattr(tl, "decode_image", decode)
+    monkeypatch.setattr(hub, "hf_hub_download", download)
+    monkeypatch.setattr(tl, "atomic_json", commit)
+    with pytest.raises(KeyboardInterrupt):
+        tl.preprocess(cache=cache, image_size=128, task_texts=texts, stream=True)
+    meta = json.loads((cache / "manifest.json").read_text())
+    assert meta["completed_files"] == ["data/chunk-000/file-308.parquet"] and not meta["complete"]
+    assert "fingerprint" not in meta and not (cache / ".stream-source").exists()
+    with pytest.raises(ValueError, match="preprocess"):
+        tl.Batches(cache, 4)
+    # Simulate SIGKILL leaving a stale download and only enough free space for
+    # remaining physical blocks plus the reserve (less than a fresh build).
+    stale = cache / ".stream-source/stale.incomplete"
+    stale.parent.mkdir()
+    stale.write_bytes(b"partial")
+    allocated = sum(p.stat().st_blocks * 512 for p in cache.glob("*.bin"))
+    needed = sum(np.dtype(d).itemsize * np.prod(s) for d, s in tl.array_specs(24, 128).values())
+    monkeypatch.setattr(tl.shutil, "disk_usage", lambda p: SimpleNamespace(free=max(0, needed - allocated) + 2**30))
+    monkeypatch.setattr(tl, "decode_image", original_decode)
+    monkeypatch.setattr(hub, "hf_hub_download", original_download)
+    monkeypatch.setattr(tl, "atomic_json", original_json)
+    downloads.clear()
+    projections.clear()
+    meta = tl.preprocess(cache=cache, image_size=128, task_texts=texts, stream=True)
+    assert meta["complete"] and meta["fingerprint"]
+    assert downloads == ["data/chunk-000/file-309.parquet"]
+    assert ["episode_index", "frame_index", "task_index"] in projections
+    assert not stale.parent.exists()
+    arrays = tl.open_arrays(cache, meta)
+    np.testing.assert_array_equal(arrays["episode"], np.repeat(np.arange(8), 3))
+    np.testing.assert_array_equal(arrays["frame"], np.tile(np.arange(3), 8))
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_disk_reserve_refuses_before_allocation_or_download(source, remote_source, monkeypatch, stream):
+    root, cache, texts = source
+    needed = sum(np.dtype(d).itemsize * np.prod(s) for d, s in tl.array_specs(24, 128).values())
+    monkeypatch.setattr(tl.shutil, "disk_usage", lambda p: SimpleNamespace(free=needed + 2**30 - 1))
+    with pytest.raises(ValueError, match="Insufficient free disk.*plus 1 GiB"):
+        tl.preprocess(root, cache, 128, texts, stream=stream)
+    assert not cache.exists() and not remote_source[0]
+
+
+def test_stream_cli_defaults_to_separate_cache(monkeypatch):
+    calls = []
+    def preprocess(*args, **kwargs):
+        calls.append((args, kwargs))
+        return dict(frames=24, cache_bytes=1, image_size=128, val_episodes=[])
+    monkeypatch.setattr(tl, "preprocess", preprocess)
+    monkeypatch.setattr("sys.argv", ["train_libero.py", "--preprocess", "--stream", "--image-size", "128"])
+    tl.main()
+    assert calls == [((tl.DATASET, Path("runs/libero_cache_128"), 128), dict(seed=0, stream=True))]
 
 
 def test_tokenizer_padding_unknown_and_round_trip():
