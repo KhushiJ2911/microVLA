@@ -105,18 +105,20 @@ def test_summary_pairs_by_task_and_init_and_excludes_incomplete_pairs():
     assert ev.summarize([])["paired"] == {}
 
 
-def test_summary_cli_without_importing_infer_or_simulator(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("tag", [None, "dev", "test"])
+def test_summary_cli_without_importing_infer_or_simulator(tmp_path, monkeypatch, capsys, tag):
     import builtins
     original = builtins.__import__
     def guarded(name, *args, **kwargs):
         assert name != "infer" and not name.startswith(("lerobot", "libero", "mujoco"))
         return original(name, *args, **kwargs)
     monkeypatch.chdir(tmp_path)
-    ev.append_row(tmp_path / "runs/libero_eval_libero_spatial.jsonl", row())
+    path = ev.evaluation_path("libero_spatial", tag)
+    ev.append_row(path, row())
     monkeypatch.setattr(builtins, "__import__", guarded)
-    monkeypatch.setattr(ev.argparse._sys, "argv", ["eval_libero.py", "--summary"])
+    monkeypatch.setattr(ev.argparse._sys, "argv", ["eval_libero.py", "--summary", *(["--tag", tag] if tag else [])])
     ev.main()
-    summary = json.loads((tmp_path / "runs/libero_eval_libero_spatial_summary.json").read_text())
+    summary = json.loads(path.with_name(path.stem + "_summary.json").read_text())
     output = capsys.readouterr().out
     assert json.loads(output.split("\nTask |", 1)[0]) == summary
     assert "0 | 0/1 | task 0" in output
@@ -379,7 +381,8 @@ def test_video_encoding_pairs_frames_and_holds_shorter_ending(tmp_path):
 
 
 @pytest.mark.parametrize("label", ["nf4+trim:10", "nf4:5", "offload-3.5:10", "offload-2.5+trim:5", "tiny:10",
-                                  "tiny-blind:10", "tiny-no-wrist:5", "tiny-wrong-text:10", "tiny-no-state:10"])
+                                  "tiny-blind:10", "tiny-no-wrist:5", "tiny-wrong-text:10", "tiny-no-state:10",
+                                  "tiny@v1:10", "tiny@v2_10000:5", "tiny-blind@v2:10"])
 def test_parse_arm(label):
     assert ev.parse_arm(label) == label
 
@@ -387,7 +390,8 @@ def test_parse_arm(label):
 @pytest.mark.parametrize("label", ["bf16:10", "nf4:0", "nf4:-1", "nf4:1.5", "nf4:10:5",
                                    "offload-0:10", "offload-nan:10", "offload--3.5:10", "nf4+trim",
                                    "tiny-unknown:10", "tiny-blind:0", "tiny-no-state:-1", "tiny+trim:10",
-                                   "tiny-blind+trim:10", "tiny-blind-no-state:10"])
+                                   "tiny-blind+trim:10", "tiny-blind-no-state:10", "tiny@:10", "tiny@../v1:10",
+                                   "tiny@v1@v2:10", "nf4@v1:10", "tiny@v1:0"])
 def test_invalid_arm(label):
     with pytest.raises(ev.argparse.ArgumentTypeError):
         ev.parse_arm(label)
@@ -680,3 +684,122 @@ def test_main_tiny_checkpoint_identity_resume_and_changed_hash(cpu_rollout, tmp_
     with pytest.raises(ValueError, match="incompatible model identity"):
         ev.main()
     assert len(make_calls) == 2 and log.read_bytes() == before
+
+
+def test_named_checkpoint_paths_and_default():
+    assert ev.tiny_checkpoints([]) == {"": ev.Path("runs/libero_tiny/latest.pt")}
+    assert ev.tiny_checkpoints(["old.pt", "v1=one.pt", "v2=two.pt"]) == {
+        "": ev.Path("old.pt"), "v1": ev.Path("one.pt"), "v2": ev.Path("two.pt")}
+
+
+@pytest.mark.parametrize("flags", [
+    ["--init-start", "-1"], ["--init-start", "50"], ["--init-start", "45", "--inits", "10"],
+    ["--inits", "51"], ["--tag", "../dev"], ["--tag", ""],
+    ["--arms", "tiny@missing:10"], ["--tiny-ckpt", "v1=a", "--tiny-ckpt", "v1=b"],
+    ["--tiny-ckpt", "v1="], ["--tiny-ckpt", "=x"], ["--tiny-ckpt", "a", "--tiny-ckpt", "b"],
+    ["--suite", "libero_goal", "--arms", "tiny-wrong-text@v1:10", "--tiny-ckpt", "v1=x"],
+])
+def test_invalid_split_tag_and_checkpoint_flags(tmp_path, monkeypatch, flags):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ev.sys, "argv", ["eval_libero.py", *flags])
+    with pytest.raises(SystemExit) as exc:
+        ev.main()
+    assert exc.value.code == 2 and not (tmp_path / "runs").exists()
+
+
+@pytest.mark.parametrize("start,count,tag", [(10, 10, "dev"), (20, 30, "test"), (49, 1, "last")])
+def test_init_range_tag_paths_resume_and_pairing(tmp_path, monkeypatch, start, count, tag):
+    import infer
+    import lerobot.envs.factory as factory
+    monkeypatch.chdir(tmp_path)
+    original = tmp_path / "runs/libero_eval_libero_spatial.jsonl"
+    ev.append_row(original, row())
+    before = original.read_bytes()
+    monkeypatch.setattr(factory, "make_env", lambda cfg, **kw: {cfg.task: {0: SimpleNamespace(close=lambda: None)}})
+    monkeypatch.setattr(factory, "make_env_pre_post_processors", lambda *a: (None, None))
+    monkeypatch.setattr(infer, "load_policy", lambda *a, **kw: (SimpleNamespace(config=None), None, None, {}))
+    calls = []
+    def episode(*args):
+        task, init, steps = args[7:10]
+        calls.append((task, init, steps))
+        return row(task, init, steps, success=steps == 10), []
+    monkeypatch.setattr(ev, "episode", episode)
+    monkeypatch.setattr(ev.sys, "argv", ["eval_libero.py", "--init-start", str(start), "--inits", str(count), "--tag", tag])
+    ev.main()
+    path = tmp_path / f"runs/libero_eval_libero_spatial_{tag}.jsonl"
+    data = path.read_bytes()
+    assert original.read_bytes() == before
+    assert calls == [(0, init, steps) for init in range(start, start + count) for steps in (10, 5)]
+    assert {r["init_start"] for r in ev.read_rows(path).values()} == {start}
+    ev.main()
+    assert path.read_bytes() == data and len(calls) == 2 * count
+    summary = json.loads(path.with_name(path.stem + "_summary.json").read_text())
+    pair = summary["paired"]["nf4+trim:10 vs nf4+trim:5"]
+    assert pair["complete_pairs"] == count and pair["mcnemar_exact_p"] == ev.mcnemar(count, 0)
+    assert summary["init_indices"] == list(range(start, start + count))
+    assert summary["protocol"] == protocol()
+
+
+def test_named_checkpoints_paired_workers_identity_and_resume(tmp_path, monkeypatch):
+    import hashlib
+    import train_libero as tl
+    import lerobot.envs.factory as factory
+    monkeypatch.chdir(tmp_path)
+    paths = {name: tmp_path / f"{name}.pt" for name in ("v1", "v2")}
+    for name, path in paths.items():
+        torch.save(dict(phase="train", name=name), path)
+    env_calls, loads, episodes = [], [], []
+    monkeypatch.setattr(factory, "make_env", lambda cfg, **kw: env_calls.append(1) or {
+        cfg.task: {0: SimpleNamespace(close=lambda: None)}})
+    monkeypatch.setattr(factory, "make_env_pre_post_processors", lambda *a: (None, None))
+    def policy(ckpt, **kw):
+        loads.append(ckpt["name"])
+        return SimpleNamespace(config=None, name=ckpt["name"], instruction_tokenization=lambda text: {})
+    monkeypatch.setattr(tl, "TinyPolicy", policy)
+    def episode(*args):
+        policy = args[1]
+        task, init, steps = args[7:10]
+        episodes.append((policy.name, init, steps))
+        return row(task, init, steps, success=policy.name == "v2"), []
+    monkeypatch.setattr(ev, "episode", episode)
+    workers = []
+    def run(cmd):
+        workers.append(cmd[-1])
+        with monkeypatch.context() as worker:
+            worker.setattr(ev.sys, "argv", cmd[1:])
+            ev.main()
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(ev.subprocess, "run", run)
+    command = ["eval_libero.py", "--init-start", "10", "--inits", "10", "--tag", "dev",
+               "--arms", "tiny@v1:10", "tiny@v2:10",
+               "--tiny-ckpt", f"v1={paths['v1']}", "--tiny-ckpt", f"v2={paths['v2']}"]
+    monkeypatch.setattr(ev.sys, "argv", command)
+    ev.main()
+    path = tmp_path / "runs/libero_eval_libero_spatial_dev.jsonl"
+    original = path.read_bytes()
+    saved = ev.read_rows(path)
+    assert workers == ["tiny@v1:10", "tiny@v2:10"] and loads == ["v1", "v2"]
+    for name, checkpoint in paths.items():
+        identity = dict(checkpoint_path=str(checkpoint), checkpoint_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest())
+        assert all(saved[f"tiny@{name}:10", 0, init]["model_identity"] == identity for init in range(10, 20))
+    ev.main()
+    assert len(episodes) == 20 and loads == ["v1", "v2"] and path.read_bytes() == original
+    summary = json.loads(path.with_name(path.stem + "_summary.json").read_text())
+    pair = summary["paired"]["tiny@v1:10 vs tiny@v2:10"]
+    assert pair["complete_pairs"] == pair["table"]["only_b"] == 10
+    assert pair["mcnemar_exact_p"] == ev.mcnemar(0, 10)
+    # Same hash at a different path must also be refused for an existing arm.
+    alias = tmp_path / "alias.pt"
+    alias.write_bytes(paths["v1"].read_bytes())
+    calls = len(env_calls)
+    with monkeypatch.context() as changed:
+        changed.setattr(ev.sys, "argv", [*command[:-4], "--tiny-ckpt", f"v1={alias}", "--tiny-ckpt", f"v2={paths['v2']}"])
+        with pytest.raises(ValueError, match="incompatible model identity"):
+            ev.main()
+    torch.save(dict(phase="train", name="changed"), paths["v1"])
+    with pytest.raises(ValueError, match="incompatible model identity"):
+        ev.main()
+    assert len(env_calls) == calls and path.read_bytes() == original
+    with pytest.raises(ValueError, match="identities"):
+        ev.summarize([*saved.values(), {**saved["tiny@v1:10", 0, 10], "init_index": 20,
+                                      "model_identity": {"checkpoint_sha256": "changed"}}])

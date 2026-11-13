@@ -273,12 +273,31 @@ def augment(images, pad=4):
     return x.permute(0, 2, 3, 1)[torch.arange(len(x), device=x.device)[:, None, None], y, z].permute(0, 3, 1, 2).to(torch.uint8).reshape_as(images)
 
 
-def save_checkpoint(path, model, opt, phase, step, meta, settings, rng, head=None):
+def color_jitter(images, strength=.1):
+    # Share small brightness/contrast changes across a sample's cameras.
+    x = images.float()
+    shape = (len(x), 1, 1, 1, 1)
+    brightness, contrast = [torch.empty(shape, device=x.device).uniform_(1 - strength, 1 + strength)
+                            for _ in range(2)]
+    mean = x.mean(dim=(-3, -2, -1), keepdim=True)
+    return ((x - mean) * contrast + mean).mul_(brightness).round_().clamp_(0, 255).to(images.dtype)
+
+
+@torch.no_grad()
+def update_ema(ema, model, decay):
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            ema[name].lerp_(param.detach(), 1 - decay)
+
+
+def save_checkpoint(path, model, opt, phase, step, meta, settings, rng, head=None, ema=None):
     state = dict(config=asdict(model.config), model=model.state_dict(), opt=opt.state_dict(), phase=phase,
                  step=step, norm=meta["norm"], tokenizer=meta["tokenizer"], cache_fingerprint=meta["fingerprint"],
                  settings=settings, numpy_rng=rng.bit_generator.state, torch_rng=torch.get_rng_state(),
                  cuda_rng=torch.cuda.get_rng_state() if next(model.parameters()).is_cuda else None,
                  head=head.state_dict() if head is not None else None)
+    if ema is not None:
+        state["ema"] = ema
     tmp = Path(path).with_suffix(".tmp")
     with tmp.open("wb") as f:
         torch.save(state, f)
@@ -287,7 +306,7 @@ def save_checkpoint(path, model, opt, phase, step, meta, settings, rng, head=Non
     tmp.replace(path)
 
 
-def restore_checkpoint(ckpt, model, opt, rng, head=None):
+def restore_checkpoint(ckpt, model, opt, rng, head=None, ema=None):
     model.load_state_dict(ckpt["model"])
     opt.load_state_dict(ckpt["opt"])
     rng.bit_generator.state = ckpt["numpy_rng"]
@@ -296,6 +315,9 @@ def restore_checkpoint(ckpt, model, opt, rng, head=None):
         torch.cuda.set_rng_state(ckpt["cuda_rng"])
     if head is not None:
         head.load_state_dict(ckpt["head"])
+    if ema is not None:
+        for name, value in ckpt["ema"].items():
+            ema[name].copy_(value)
     return ckpt["step"] + 1
 
 
@@ -318,7 +340,7 @@ class TinyPolicy(nn.Module):
             texts = spatial_tasks()  # Benchmark order, independent of --tasks selection.
             self.wrong_text = dict(zip(texts, texts[1:] + texts[:1]))
         self.model = MicroVLA(Config(**ckpt["config"])).to(device).eval()
-        self.model.load_state_dict(ckpt["model"])
+        self.model.load_state_dict({**ckpt["model"], **(ckpt.get("ema") or {})})
         self.norm, self.tok = ckpt["norm"], ckpt["tokenizer"]
         self.config = SimpleNamespace(chunk_size=self.model.config.horizon, max_action_dim=7,
                                       n_action_steps=self.model.config.horizon,
@@ -394,6 +416,9 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--distill-batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--ema", type=float, help="EMA decay in [0, 1); disabled by default")
+    parser.add_argument("--save-every", type=int, default=0, help="numbered action-training snapshots; 0 disables")
+    parser.add_argument("--color-jitter", action="store_true", help="small per-sample brightness/contrast augmentation")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--compile", action="store_true")
@@ -401,6 +426,10 @@ def main():
     args = parser.parse_args()
     if min(args.batch_size, args.distill_batch_size, args.horizon, args.lr) <= 0 or min(args.steps, args.distill_steps) < 0:
         parser.error("batch sizes, horizon and lr must be positive; steps must be nonnegative")
+    if args.ema is not None and not 0 <= args.ema < 1:
+        parser.error("--ema must be in [0, 1)")
+    if args.save_every < 0:
+        parser.error("--save-every must be nonnegative")
     if args.preprocess:
         meta = preprocess(args.source, args.cache, args.image_size, seed=args.seed)
         print(json.dumps({k: meta[k] for k in ("frames", "cache_bytes", "image_size", "val_episodes")}))
@@ -410,17 +439,18 @@ def main():
     device = torch.device(args.device)
     data = Batches(args.cache, args.horizon, args.seed)
     c = Config(image_size=data.meta["image_size"], num_cameras=2, vocab_size=len(data.meta["tokenizer"]["vocab"]), horizon=args.horizon, state_dim=8, action_dim=7)
-    settings = {k: getattr(args, k) for k in ("steps", "distill_steps", "batch_size", "distill_batch_size", "lr", "seed")}
+    settings = {k: getattr(args, k) for k in ("steps", "distill_steps", "batch_size", "distill_batch_size", "lr", "seed", "ema", "color_jitter")}
     path = args.runs / "latest.pt"
     ckpt = torch.load(path, map_location="cpu", weights_only=True) if args.resume and path.exists() else None
     if args.resume and ckpt is None:
         raise FileNotFoundError(f"No checkpoint to resume: {path}")
     if path.exists() and not args.resume:
         raise ValueError("Checkpoint exists; use --resume or another --runs")
-    if ckpt and (ckpt["config"] != asdict(c) or ckpt["settings"] != settings or ckpt["cache_fingerprint"] != data.meta["fingerprint"]):
+    if ckpt and (ckpt["config"] != asdict(c) or {"ema": None, "color_jitter": False, **ckpt["settings"]} != settings or ckpt["cache_fingerprint"] != data.meta["fingerprint"]):
         raise ValueError("Resume configuration/cache differs from checkpoint")
     args.runs.mkdir(parents=True, exist_ok=True)
     model = MicroVLA(c).to(device)
+    ema = {k: v.detach().clone() for k, v in model.state_dict().items()} if args.ema is not None else None
     print(json.dumps(dict(parameters=parameter_counts(model), cache_bytes=data.meta["cache_bytes"],
                           estimated_hours=(args.steps / 1.2 + args.distill_steps / 1.0) / 3600,
                           estimate="unmeasured 3050 heuristic; measured ETA follows after 50 steps")), flush=True)
@@ -442,7 +472,7 @@ def main():
             opt = torch.optim.AdamW(params, lr=args.lr if phase == "train" else 1e-3, weight_decay=.01)
             first = 1
             if ckpt and ckpt["phase"] == phase:
-                first = restore_checkpoint(ckpt, model, opt, data.rng, head)
+                first = restore_checkpoint(ckpt, model, opt, data.rng, head, ema)
                 ckpt = None
             if phase == "train" and args.compile:
                 from torch._inductor import config as inductor_config
@@ -454,6 +484,8 @@ def main():
                 size = args.batch_size if phase == "train" else args.distill_batch_size
                 images, state, instr, actions = data.batch(size, device)
                 images = augment(images)
+                if args.color_jitter:
+                    images = color_jitter(images)
                 if phase == "distill":
                     # One random camera per frame; both cameras share the ViT.
                     images = images[torch.arange(size, device=device), torch.randint(2, (size,), device=device)]
@@ -474,6 +506,8 @@ def main():
                 for group in opt.param_groups:
                     group["lr"] = lr
                 opt.step()
+                if ema is not None:
+                    update_ema(ema, model, args.ema)
                 if step % 50 == 0 or step == total:
                     value = loss.item()
                     writer.add_scalar(f"{phase}/loss", value, step)
@@ -481,8 +515,9 @@ def main():
                     print(json.dumps(dict(phase=phase, step=step, loss=value, steps_per_s=rate, eta_minutes=(total-step)/rate/60,
                         peak_ram_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
                         peak_vram_mb=torch.cuda.max_memory_allocated() / 2**20 if device.type == "cuda" else None)), flush=True)
-                if step % 250 == 0 or step == total:
-                    if phase == "train":
+                snapshot = phase == "train" and args.save_every > 0 and step % args.save_every == 0
+                if step % 250 == 0 or step == total or snapshot:
+                    if phase == "train" and (step % 250 == 0 or step == total):
                         model.eval()
                         with torch.no_grad(), autocast(device), torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
                             torch.manual_seed(12345)
@@ -490,7 +525,9 @@ def main():
                             val = sum(model.loss(*data.batch(args.batch_size, device, "val", rng)).item() for _ in range(4)) / 4
                         writer.add_scalar("val/loss", val, step)
                         print(json.dumps(dict(step=step, val_loss=val)), flush=True)
-                    save_checkpoint(path, model, opt, phase, step, data.meta, settings, data.rng, head)
+                    if snapshot:
+                        save_checkpoint(args.runs / f"step_{step}.pt", model, opt, phase, step, data.meta, settings, data.rng, head, ema)
+                    save_checkpoint(path, model, opt, phase, step, data.meta, settings, data.rng, head, ema)
             del teacher, head, opt, params
             if device.type == "cuda":
                 torch.cuda.empty_cache()

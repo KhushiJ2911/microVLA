@@ -276,6 +276,44 @@ def test_two_camera_forward_loss_and_cached_sampling():
     assert shifted.dtype == images.dtype and shifted.shape == images.shape
 
 
+def test_ema_math_independent_copy_and_frozen_weights():
+    model = torch.nn.Linear(2, 1)
+    model.weight.data.fill_(2)
+    model.bias.data.fill_(7)
+    model.bias.requires_grad_(False)
+    ema = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    model.weight.data.fill_(6)
+    model.bias.data.fill_(9)
+    tl.update_ema(ema, model, .75)
+    torch.testing.assert_close(ema["weight"], torch.full_like(model.weight, 3))
+    tl.update_ema(ema, model, .75)
+    torch.testing.assert_close(ema["weight"], torch.full_like(model.weight, 3.75))
+    assert ema["bias"].item() == 7 and not ema["weight"].requires_grad
+    assert model.weight[0, 0].item() == 6
+
+
+@pytest.mark.parametrize("use_ema", [False, True])
+def test_tiny_policy_loads_ema_or_legacy_raw_weights(use_ema):
+    ckpt = fake_checkpoint(dict(tokenizer=tl.tokenizer(["move mug"]), norm={}))
+    if use_ema:
+        ckpt["ema"] = {k: v.clone().add_(.125) for k, v in ckpt["model"].items()}
+    policy = tl.TinyPolicy(ckpt, "cpu")
+    expected = ckpt["ema"] if use_ema else ckpt["model"]
+    for k, value in policy.model.state_dict().items():
+        torch.testing.assert_close(value, expected[k], atol=0, rtol=0)
+
+
+def test_color_jitter_is_small_per_sample_and_preserves_input():
+    images = torch.arange(48, 208, dtype=torch.uint8).reshape(1, 1, 1, 10, 16).expand(12, 2, 3, -1, -1).clone()
+    before = images.clone()
+    jittered = tl.color_jitter(images)
+    assert jittered.dtype == images.dtype and jittered.shape == images.shape
+    assert torch.equal(images, before) and not torch.equal(images, jittered)
+    assert torch.equal(jittered[:, 0], jittered[:, 1])
+    assert not torch.equal(jittered[0], jittered[1])
+    assert (jittered.float() - images.float()).abs().max() < 40
+
+
 @pytest.mark.parametrize("phase", ["distill", "train"])
 def test_checkpoint_resume_restores_optimizer_rng_and_progress(source, phase):
     meta = build(source)
@@ -463,25 +501,48 @@ def test_live_log_compatibility_on_copy_only(tmp_path):
     assert all("policy" not in r["protocol"] and "model_identity" in r for r in rows.values())
 
 
-def test_cli_cpu_training_and_resume(source, tmp_path, monkeypatch):
+@pytest.mark.parametrize("extras", [[], ["--ema", ".9", "--save-every", "1", "--color-jitter"]])
+def test_cli_cpu_training_and_resume(source, tmp_path, monkeypatch, extras):
     build(source)
+    monkeypatch.chdir(tmp_path)
+    baseline = tmp_path / "runs/libero_tiny/latest.pt"
+    baseline.parent.mkdir(parents=True)
+    baseline.write_bytes(b"existing baseline checkpoint")
     runs = tmp_path / "training"
     original = tl.Config
     monkeypatch.setattr(tl, "Config", lambda **kw: original(**{**asdict(config()), **kw}))
     command = ["train_libero.py", "--cache", str(source[1]), "--runs", str(runs), "--device", "cpu",
                "--steps", "2", "--distill-steps", "0", "--batch-size", "2", "--horizon", "4"]
+    command += extras
     monkeypatch.setattr("sys.argv", command)
     tl.main()
     saved = torch.load(runs / "latest.pt", weights_only=True)
     assert saved["step"] == 2 and saved["phase"] == "train"
     assert (runs / "tb").exists()
+    assert baseline.read_bytes() == b"existing baseline checkpoint"
+    if extras:
+        for step in (1, 2):
+            snapshot = torch.load(runs / f"step_{step}.pt", weights_only=True)
+            assert snapshot["step"] == step and snapshot["phase"] == "train" and snapshot["ema"]
+        for key in saved["model"]:
+            torch.testing.assert_close(snapshot["model"][key], saved["model"][key], atol=0, rtol=0)
+            torch.testing.assert_close(snapshot["ema"][key], saved["ema"][key], atol=0, rtol=0)
+        assert not list(runs.glob("*.tmp"))
+    else:
+        assert "ema" not in saved and not list(runs.glob("step_*.pt"))
+        # Legacy settings (before these flags existed) still resume with defaults.
+        for key in ("ema", "color_jitter"):
+            saved["settings"].pop(key)
+        torch.save(saved, runs / "latest.pt")
     before = (runs / "latest.pt").read_bytes()
     monkeypatch.setattr("sys.argv", [*command, "--resume"])
     tl.main()
     assert (runs / "latest.pt").read_bytes() == before
 
 
-def test_offline_distillation_resumes_into_training_exactly(source, tmp_path, monkeypatch):
+@pytest.mark.parametrize("ema", [False, True])
+@pytest.mark.parametrize("interrupted_phase", ["distill", "train"])
+def test_offline_distillation_resumes_into_training_exactly(source, tmp_path, monkeypatch, ema, interrupted_phase):
     import transformers
     build(source)
     class Teacher(torch.nn.Module):
@@ -500,27 +561,32 @@ def test_offline_distillation_resumes_into_training_exactly(source, tmp_path, mo
     monkeypatch.setattr(transformers, "SiglipVisionModel", Teacher)
     original_config = tl.Config
     monkeypatch.setattr(tl, "Config", lambda **kw: original_config(**{**asdict(config()), **kw}))
-    base = ["train_libero.py", "--cache", str(source[1]), "--device", "cpu", "--steps", "2",
+    base = ["train_libero.py", "--cache", str(source[1]), "--device", "cpu", "--steps", "3", "--save-every", "2",
             "--distill-steps", "2", "--batch-size", "2", "--distill-batch-size", "2", "--horizon", "4"]
+    if ema:
+        base += ["--ema", ".9", "--color-jitter"]
     uninterrupted, resumed = tmp_path / "full", tmp_path / "resumed"
     monkeypatch.setattr("sys.argv", [*base, "--runs", str(uninterrupted)])
     tl.main()
     original_save = tl.save_checkpoint
     def interrupt(*args, **kwargs):
         original_save(*args, **kwargs)
-        if args[3] == "distill":
+        if args[3] == interrupted_phase and Path(args[0]).name == "latest.pt":
             raise KeyboardInterrupt
     monkeypatch.setattr(tl, "save_checkpoint", interrupt)
     monkeypatch.setattr("sys.argv", [*base, "--runs", str(resumed)])
     with pytest.raises(KeyboardInterrupt):
         tl.main()
     checkpoint = torch.load(resumed / "latest.pt", weights_only=True)
-    assert checkpoint["phase"] == "distill" and checkpoint["head"] and checkpoint["step"] == 2
+    assert checkpoint["phase"] == interrupted_phase and checkpoint["step"] == 2
+    assert bool(checkpoint["head"]) == (interrupted_phase == "distill")
     monkeypatch.setattr(tl, "save_checkpoint", original_save)
     monkeypatch.setattr("sys.argv", [*base, "--runs", str(resumed), "--resume"])
     tl.main()
     a = torch.load(uninterrupted / "latest.pt", weights_only=True)
     b = torch.load(resumed / "latest.pt", weights_only=True)
-    assert a["phase"] == b["phase"] == "train" and a["step"] == b["step"] == 2
+    assert a["phase"] == b["phase"] == "train" and a["step"] == b["step"] == 3
     for key in a["model"]:
         torch.testing.assert_close(a["model"][key], b["model"][key], atol=0, rtol=0)
+        if ema:
+            torch.testing.assert_close(a["ema"][key], b["ema"][key], atol=0, rtol=0)

@@ -14,12 +14,37 @@ def seed(suite, task, init, chunk):
     return int.from_bytes(hashlib.sha256(f"{suite}:{task}:{init}:{chunk}".encode()).digest()[:4], "little")
 
 def parse_arm(label):
-    if not re.fullmatch(r"(?:(?:nf4|offload-\d+(?:\.\d+)?)(?:\+trim)?|tiny(?:-(?:blind|no-wrist|wrong-text|no-state))?):[1-9]\d*", label):
-        raise argparse.ArgumentTypeError("arm must be tiny[-blind|-no-wrist|-wrong-text|-no-state]:steps, nf4[+trim]:steps or offload-GiB[+trim]:steps")
+    if not re.fullmatch(r"(?:(?:nf4|offload-\d+(?:\.\d+)?)(?:\+trim)?|tiny(?:-(?:blind|no-wrist|wrong-text|no-state))?(?:@[A-Za-z0-9][A-Za-z0-9_.-]*)?):[1-9]\d*", label):
+        raise argparse.ArgumentTypeError("arm must be tiny[-ablation][@NAME]:steps, nf4[+trim]:steps or offload-GiB[+trim]:steps")
     placement, steps = label.split(":")
     if placement.startswith("offload-") and float(placement.removeprefix("offload-").removesuffix("+trim")) <= 0:
         raise argparse.ArgumentTypeError("offload budget must be positive")
     return f"{placement}:{int(steps)}"
+
+def parse_name(value):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise argparse.ArgumentTypeError("use a name containing letters, digits, underscores, dots or hyphens")
+    return value
+
+def tiny_checkpoints(values):
+    paths = {"": Path("runs/libero_tiny/latest.pt")}
+    seen = set()
+    for value in values:
+        name, sep, path = value.partition("=")
+        if sep:
+            parse_name(name)
+            if not path:
+                raise argparse.ArgumentTypeError("--tiny-ckpt requires NAME=PATH or PATH")
+        else:
+            name, path = "", value
+        if name in seen:
+            raise argparse.ArgumentTypeError(f"duplicate --tiny-ckpt name: {name or '(default)'}")
+        seen.add(name)
+        paths[name] = Path(path)
+    return paths
+
+def evaluation_path(suite, tag=None):
+    return Path(f"runs/libero_eval_{suite}{'_' + parse_name(tag) if tag is not None else ''}.jsonl")
 def normalize(row):
     row = dict(row)
     spec = dict(row.get("protocol") or {})
@@ -108,6 +133,7 @@ def summarize(rows):
         comparisons[f"{a} vs {b}"] = dict(arm_a=a, arm_b=b, table=table, complete_pairs=sum(table.values()),
             incomplete_pairs=len(eligible) - sum(table.values()), mcnemar_exact_p=mcnemar(table["only_a"], table["only_b"]))
     return dict(arms=arms, per_task=tasks, paired=comparisons, protocol=rows[0]["protocol"] if rows else None,
+                init_indices=sorted({r["init_index"] for r in rows}),
                 external_sanity_anchor=dict(label="openpi published; different checkpoint/framework; not paired",
                     success_percent=dict(libero_spatial=98.8, libero_object=98.2, libero_goal=98.0, libero_10=92.4)),
                 **{k: sorted({r[k] for r in rows}) for k in ("n_action_steps", "checkpoint_n_action_steps",
@@ -196,22 +222,35 @@ def save_video(target, frames, fps):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=list(MAX_STEPS), default="libero_spatial")
-    for flag, default in (("inits", 10), ("videos", 0), ("replan", 5), ("num-steps-wait", 10),
+    for flag, default in (("inits", 10), ("init-start", 0), ("videos", 0), ("replan", 5), ("num-steps-wait", 10),
                           ("observation-height", 256), ("observation-width", 256), ("seed", 7)):
         parser.add_argument(f"--{flag}", type=int, default=default)
     parser.add_argument("--arms", nargs="+", type=parse_arm, default=["nf4+trim:10", "nf4+trim:5"])
     parser.add_argument("--tasks", nargs="+", type=int)
-    parser.add_argument("--tiny-ckpt", type=Path, default=Path("runs/libero_tiny/latest.pt"))
+    parser.add_argument("--tiny-ckpt", action="append", default=[], metavar="[NAME=]PATH",
+                        help="repeat for named tiny arms; bare PATH selects plain tiny (default: runs/libero_tiny/latest.pt)")
+    parser.add_argument("--tag", type=parse_name, help="suffix for separate evaluation logs and videos")
     parser.add_argument("--summary", action="store_true", help="summarize all persisted episodes without loading policy/env")
     parser.add_argument("--max-steps", "--episode-length", type=int, help="policy actions, excluding settling")
     args = parser.parse_args()
-    if args.suite != "libero_spatial" and any(a.startswith("tiny-wrong-text:") for a in args.arms):
+    try:
+        checkpoints = tiny_checkpoints(args.tiny_ckpt)
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
+    if not args.summary:
+        for arm in args.arms:
+            config = arm.split(":")[0]
+            if "@" in config and config.split("@")[1] not in checkpoints:
+                parser.error(f"missing --tiny-ckpt {config.split('@')[1]}=PATH")
+    if args.suite != "libero_spatial" and any(a.split(":")[0].split("@")[0] == "tiny-wrong-text" for a in args.arms):
         parser.error("tiny-wrong-text requires --suite libero_spatial")
     if len(set(args.arms)) != len(args.arms) or args.inits < 1 or args.videos < 0:
         parser.error("use unique arms, --inits >= 1, --videos >= 0")
+    if args.init_start < 0 or args.init_start + args.inits > 50:
+        parser.error("init range must lie within the 50 official states (0..49)")
     if min(args.replan, args.observation_height, args.observation_width, args.max_steps or 1) < 1 or args.max_steps == 0 or args.num_steps_wait < 0 or not 0 <= args.seed < 2**32:
         parser.error("replan/dimensions/max-steps must be positive, wait >= 0, seed in [0, 2**32)")
-    path = Path(f"runs/libero_eval_{args.suite}.jsonl")
+    path = evaluation_path(args.suite, args.tag)
     rows = read_rows(path)
     if args.summary: return report(path, rows)
     groups = {a.split(":")[0]: [] for a in args.arms}
@@ -226,20 +265,23 @@ def main():
     if any(r.get("protocol") != spec for r in rows.values()):
         raise ValueError("Resume log has incompatible protocol metadata; use another output directory when changing settings")
     config = next(iter(groups))
-    if config == "tiny" or config.startswith("tiny-"):
+    base, _, checkpoint_name = config.partition("@")
+    is_tiny = base == "tiny" or base.startswith("tiny-")
+    if is_tiny:
         import torch
         from train_libero import TinyPolicy, IdentityProcessor
         digest = hashlib.sha256()
-        with args.tiny_ckpt.open("rb") as f:
+        checkpoint_path = checkpoints[checkpoint_name]
+        with checkpoint_path.open("rb") as f:
             for block in iter(lambda: f.read(1024 * 1024), b""):
                 digest.update(block)
             f.seek(0)  # Hash and load the same inode even if training atomically replaces latest.pt.
             tiny_checkpoint = torch.load(f, map_location="cpu", weights_only=True)
         if tiny_checkpoint.get("phase") != "train":
             raise ValueError("Tiny checkpoint has not completed any action training")
-        identity = dict(checkpoint_path=str(args.tiny_ckpt.resolve()), checkpoint_sha256=digest.hexdigest())
-        if config.startswith("tiny-"):
-            identity["ablation"] = config.removeprefix("tiny-")
+        identity = dict(checkpoint_path=str(checkpoint_path.resolve()), checkpoint_sha256=digest.hexdigest())
+        if base.startswith("tiny-"):
+            identity["ablation"] = base.removeprefix("tiny-")
     else:
         identity = dict(policy=infer.POLICY, revision=infer.REVISION)
     if any(r.get("model_identity", identity) != identity for r in rows.values() if r["arm"] in args.arms):
@@ -255,14 +297,14 @@ def main():
     envs = make_env(cfg, n_envs=1)[args.suite]
     policy = None
     try:
-        for ordinal, (task, init) in enumerate((t, i) for t in sorted(envs) for i in range(args.inits)):
-            stem = Path(f"assets/libero/{args.suite}_task{task}_init{init}")
+        for ordinal, (task, init) in enumerate((t, i) for t in sorted(envs) for i in range(args.init_start, args.init_start + args.inits)):
+            stem = Path(f"assets/libero/{args.suite}{'_' + args.tag if args.tag else ''}_task{task}_init{init}")
             scenes = [stem.with_name(stem.name + f"_{a.replace(':', '_')}.mp4") for a in args.arms]
             for arm, scene in zip(args.arms, scenes, strict=True):
                 steps = int(arm.split(":")[1])
                 if (arm, task, init) in rows: continue
                 if policy is None:
-                    if config == "tiny" or config.startswith("tiny-"):
+                    if is_tiny:
                         policy = TinyPolicy(tiny_checkpoint, ablation=identity.get("ablation"))
                         del tiny_checkpoint
                         pre, post = IdentityProcessor(), IdentityProcessor()
@@ -270,8 +312,8 @@ def main():
                         policy, pre, post, _ = infer.load_policy(config.removesuffix("+trim"), trim=config.endswith("+trim"))
                     env_pre, env_post = make_env_pre_post_processors(cfg, policy.config)
                 row, frames = episode(envs[task], policy, pre, post, env_pre, env_post, args.suite, task, init, steps, ordinal < args.videos, spec)
-                row.update(arm=arm, placement=config.removesuffix("+trim"), trim=config.endswith("+trim"), protocol=spec, model_identity=identity, inits_requested=args.inits)
-                if config == "tiny" or config.startswith("tiny-"):
+                row.update(arm=arm, placement=config.removesuffix("+trim"), trim=config.endswith("+trim"), protocol=spec, model_identity=identity, inits_requested=args.inits, init_start=args.init_start)
+                if is_tiny:
                     row["instruction_tokenization"] = policy.instruction_tokenization(row["task_text"])
                 append_row(path, row)  # Durable before video encoding or the next episode.
                 rows[arm, task, init] = row
@@ -282,7 +324,7 @@ def main():
                     paired_video(scenes, [rows[a, task, init] for a in args.arms], stem.with_name(stem.name + f"_{config}_paired.mp4"), cfg.fps)
                 else:
                     print(f"Missing scene cache for {stem}; completed episodes remain skipped", flush=True)
-            if init + 1 == args.inits: envs[task].close()  # Release EGL before the next task.
+            if init + 1 == args.init_start + args.inits: envs[task].close()  # Release EGL before the next task.
     finally:
         for env in envs.values(): env.close()
     report(path, rows)
