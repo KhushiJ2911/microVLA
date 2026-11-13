@@ -42,6 +42,66 @@
       },
       "mean_policy_latency_s": 3.2730822959660673
     },
+    "tiny-blind:10": {
+      "episodes": 100,
+      "successes": 0,
+      "rate": 0.0,
+      "wilson95": [
+        3.469446951953614e-18,
+        0.03699349820698568
+      ],
+      "model_identity": {
+        "checkpoint_path": "/home/keyu/Documents/ChatGPT/Mujuco/.worktrees/infer/runs/libero_tiny/latest.pt",
+        "checkpoint_sha256": "dc4a45c6585a0054e0938edd52fd440a277503e164ad6aaa64a587f315e14be0",
+        "ablation": "blind"
+      },
+      "mean_policy_latency_s": 0.07296292859409649
+    },
+    "tiny-no-state:10": {
+      "episodes": 100,
+      "successes": 4,
+      "rate": 0.04,
+      "wilson95": [
+        0.01566330399154762,
+        0.0983707143588792
+      ],
+      "model_identity": {
+        "checkpoint_path": "/home/keyu/Documents/ChatGPT/Mujuco/.worktrees/infer/runs/libero_tiny/latest.pt",
+        "checkpoint_sha256": "dc4a45c6585a0054e0938edd52fd440a277503e164ad6aaa64a587f315e14be0",
+        "ablation": "no-state"
+      },
+      "mean_policy_latency_s": 0.06770431043850662
+    },
+    "tiny-no-wrist:10": {
+      "episodes": 100,
+      "successes": 0,
+      "rate": 0.0,
+      "wilson95": [
+        3.469446951953614e-18,
+        0.03699349820698568
+      ],
+      "model_identity": {
+        "checkpoint_path": "/home/keyu/Documents/ChatGPT/Mujuco/.worktrees/infer/runs/libero_tiny/latest.pt",
+        "checkpoint_sha256": "dc4a45c6585a0054e0938edd52fd440a277503e164ad6aaa64a587f315e14be0",
+        "ablation": "no-wrist"
+      },
+      "mean_policy_latency_s": 0.07271892345432868
+    },
+    "tiny-wrong-text:10": {
+      "episodes": 100,
+      "successes": 1,
+      "rate": 0.01,
+      "wilson95": [
+        0.0017674320641406505,
+        0.054486196178705315
+      ],
+      "model_identity": {
+        "checkpoint_path": "/home/keyu/Documents/ChatGPT/Mujuco/.worktrees/infer/runs/libero_tiny/latest.pt",
+        "checkpoint_sha256": "dc4a45c6585a0054e0938edd52fd440a277503e164ad6aaa64a587f315e14be0",
+        "ablation": "wrong-text"
+      },
+      "mean_policy_latency_s": 0.0708417935532672
+    },
     "tiny:10": {
       "episodes": 100,
       "successes": 75,
@@ -72,6 +132,22 @@
         10,
         10
       ],
+      "tiny-blind:10": [
+        0,
+        10
+      ],
+      "tiny-no-state:10": [
+        2,
+        10
+      ],
+      "tiny-no-wrist:10": [
+        0,
+        10
+      ],
+      "tiny-wrong-text:10": [
+        0,
+        10
+      ],
       "tiny:10": [
         9,
         10
@@ -89,6 +165,22 @@
       ],
       "offload-3.5:10": [
         10,
+        10
+      ],
+      "tiny-blind:10": [
+        0,
+        10
+      ],
+      "tiny-no-state:10": [
+        0,
+        10
+      ],
+      "tiny-no-wrist:10": [
+        0,
+        10
+      ],
+      "tiny-wrong-text:10": [
+        0,
         10
       ],
       "tiny:10": [
@@ -110,6 +202,22 @@
         10,
         10
       ],
+      "tiny-blind:10": [
+        0,
+        10
+      ],
+      "tiny-no-state:10": [
+        0,
+        10
+      ],
+      "tiny-no-wrist:10": [
+        0,
+        10
+      ],
+      "tiny-wrong-text:10": [
+        0,
+        10
+      ],
       "tiny:10": [
         9,
         10
@@ -127,6 +235,22 @@
       ],
       "offload-3.5:10": [
         10,
+        10
+      ],
+      "tiny-blind:10": [
+        0,
+        10
+      ],
+      "tiny-no-state:10": [
+        0,
+        10
+      ],
+      "tiny-no-wrist:10": [
+        0,
+        10
+      ],
+      "tiny-wrong-text:10": [
+        1,
         10
       ],
       "tiny:10": [
@@ -148,6 +272,22 @@
         10,
         10
       ],
+      "tiny-blind:10": [
+        0,
+        10
+      ],
+      "tiny-no-state:10": [
+        0,
+        10
+      ],
+      "tiny-no-wrist:10": [
+        0,
+        10
+      ],
+      "tiny-wrong-text:10": [
+        0,
+        10
+      ],
       "tiny:10": [
         4,
         10
@@ -165,6 +305,22 @@
       ],
       "offload-3.5:10": [
         10,
+        10
+      ],
+      "tiny-blind:10": [
+        0,
+        10
+      ],
+      "tiny-no-state:10": [
+        0,
+        10
+      ],
+      "tiny-no-wrist:10": [
+        0,
+        10
+      ],
+      "tiny-wrong-text:10": [
+        0,
         10
       ],
       "tiny:10": [
@@ -186,6 +342,22 @@
         10,
         10
       ],
+      "tiny-blind:10": [
+        0,
+        10
+      ],
+      "tiny-no-state:10": [
+        1,
+        10
+      ],
+      "tiny-no-wrist:10": [
+        0,
+        10
+      ],
+      "tiny-wrong-text:10": [
+        0,
+        10
+      ],
       "tiny:10": [
         9,
         10
@@ -203,6 +375,22 @@
       ],
       "offload-3.5:10": [
         10,
+        10
+      ],
+      "tiny-blind:10": [
+        0,
+        10
+      ],
+      "tiny-no-state:10": [
+        0,
+        10
+      ],
+      "tiny-no-wrist:10": [
+        0,
+        10
+      ],
+      "tiny-wrong-text:10": [
+        0,
         10
       ],
       "tiny:10": [
@@ -224,6 +412,22 @@
         10,
         10
       ],
+      "tiny-blind:10": [
+        0,
+        10
+      ],
+      "tiny-no-state:10": [
+        1,
+        10
+      ],
+      "tiny-no-wrist:10": [
+        0,
+        10
+      ],
+      "tiny-wrong-text:10": [
+        0,
+        10
+      ],
       "tiny:10": [
         4,
         10
@@ -241,6 +445,22 @@
       ],
       "offload-3.5:10": [
         9,
+        10
+      ],
+      "tiny-blind:10": [
+        0,
+        10
+      ],
+      "tiny-no-state:10": [
+        0,
+        10
+      ],
+      "tiny-no-wrist:10": [
+        0,
+        10
+      ],
+      "tiny-wrong-text:10": [
+        0,
         10
       ],
       "tiny:10": [
@@ -276,6 +496,58 @@
       "incomplete_pairs": 0,
       "mcnemar_exact_p": 1.0
     },
+    "nf4+trim:10 vs tiny-blind:10": {
+      "arm_a": "nf4+trim:10",
+      "arm_b": "tiny-blind:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 98,
+        "only_b": 0,
+        "both_fail": 2
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 6.310887241768095e-30
+    },
+    "nf4+trim:10 vs tiny-no-state:10": {
+      "arm_a": "nf4+trim:10",
+      "arm_b": "tiny-no-state:10",
+      "table": {
+        "both_succeed": 4,
+        "only_a": 94,
+        "only_b": 0,
+        "both_fail": 2
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.0097419586828951e-28
+    },
+    "nf4+trim:10 vs tiny-no-wrist:10": {
+      "arm_a": "nf4+trim:10",
+      "arm_b": "tiny-no-wrist:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 98,
+        "only_b": 0,
+        "both_fail": 2
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 6.310887241768095e-30
+    },
+    "nf4+trim:10 vs tiny-wrong-text:10": {
+      "arm_a": "nf4+trim:10",
+      "arm_b": "tiny-wrong-text:10",
+      "table": {
+        "both_succeed": 1,
+        "only_a": 97,
+        "only_b": 0,
+        "both_fail": 2
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.262177448353619e-29
+    },
     "nf4+trim:10 vs tiny:10": {
       "arm_a": "nf4+trim:10",
       "arm_b": "tiny:10",
@@ -302,6 +574,58 @@
       "incomplete_pairs": 0,
       "mcnemar_exact_p": 1.0
     },
+    "nf4+trim:5 vs tiny-blind:10": {
+      "arm_a": "nf4+trim:5",
+      "arm_b": "tiny-blind:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 98,
+        "only_b": 0,
+        "both_fail": 2
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 6.310887241768095e-30
+    },
+    "nf4+trim:5 vs tiny-no-state:10": {
+      "arm_a": "nf4+trim:5",
+      "arm_b": "tiny-no-state:10",
+      "table": {
+        "both_succeed": 4,
+        "only_a": 94,
+        "only_b": 0,
+        "both_fail": 2
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.0097419586828951e-28
+    },
+    "nf4+trim:5 vs tiny-no-wrist:10": {
+      "arm_a": "nf4+trim:5",
+      "arm_b": "tiny-no-wrist:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 98,
+        "only_b": 0,
+        "both_fail": 2
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 6.310887241768095e-30
+    },
+    "nf4+trim:5 vs tiny-wrong-text:10": {
+      "arm_a": "nf4+trim:5",
+      "arm_b": "tiny-wrong-text:10",
+      "table": {
+        "both_succeed": 1,
+        "only_a": 97,
+        "only_b": 0,
+        "both_fail": 2
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.262177448353619e-29
+    },
     "nf4+trim:5 vs tiny:10": {
       "arm_a": "nf4+trim:5",
       "arm_b": "tiny:10",
@@ -315,6 +639,58 @@
       "incomplete_pairs": 0,
       "mcnemar_exact_p": 2.384185791015625e-07
     },
+    "offload-3.5:10 vs tiny-blind:10": {
+      "arm_a": "offload-3.5:10",
+      "arm_b": "tiny-blind:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 99,
+        "only_b": 0,
+        "both_fail": 1
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 3.1554436208840472e-30
+    },
+    "offload-3.5:10 vs tiny-no-state:10": {
+      "arm_a": "offload-3.5:10",
+      "arm_b": "tiny-no-state:10",
+      "table": {
+        "both_succeed": 4,
+        "only_a": 95,
+        "only_b": 0,
+        "both_fail": 1
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 5.048709793414476e-29
+    },
+    "offload-3.5:10 vs tiny-no-wrist:10": {
+      "arm_a": "offload-3.5:10",
+      "arm_b": "tiny-no-wrist:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 99,
+        "only_b": 0,
+        "both_fail": 1
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 3.1554436208840472e-30
+    },
+    "offload-3.5:10 vs tiny-wrong-text:10": {
+      "arm_a": "offload-3.5:10",
+      "arm_b": "tiny-wrong-text:10",
+      "table": {
+        "both_succeed": 1,
+        "only_a": 98,
+        "only_b": 0,
+        "both_fail": 1
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 6.310887241768095e-30
+    },
     "offload-3.5:10 vs tiny:10": {
       "arm_a": "offload-3.5:10",
       "arm_b": "tiny:10",
@@ -327,6 +703,136 @@
       "complete_pairs": 100,
       "incomplete_pairs": 0,
       "mcnemar_exact_p": 1.1920928955078125e-07
+    },
+    "tiny-blind:10 vs tiny-no-state:10": {
+      "arm_a": "tiny-blind:10",
+      "arm_b": "tiny-no-state:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 0,
+        "only_b": 4,
+        "both_fail": 96
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.125
+    },
+    "tiny-blind:10 vs tiny-no-wrist:10": {
+      "arm_a": "tiny-blind:10",
+      "arm_b": "tiny-no-wrist:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 0,
+        "only_b": 0,
+        "both_fail": 100
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.0
+    },
+    "tiny-blind:10 vs tiny-wrong-text:10": {
+      "arm_a": "tiny-blind:10",
+      "arm_b": "tiny-wrong-text:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 0,
+        "only_b": 1,
+        "both_fail": 99
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.0
+    },
+    "tiny-blind:10 vs tiny:10": {
+      "arm_a": "tiny-blind:10",
+      "arm_b": "tiny:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 0,
+        "only_b": 75,
+        "both_fail": 25
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 5.293955920339377e-23
+    },
+    "tiny-no-state:10 vs tiny-no-wrist:10": {
+      "arm_a": "tiny-no-state:10",
+      "arm_b": "tiny-no-wrist:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 4,
+        "only_b": 0,
+        "both_fail": 96
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.125
+    },
+    "tiny-no-state:10 vs tiny-wrong-text:10": {
+      "arm_a": "tiny-no-state:10",
+      "arm_b": "tiny-wrong-text:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 4,
+        "only_b": 1,
+        "both_fail": 95
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.375
+    },
+    "tiny-no-state:10 vs tiny:10": {
+      "arm_a": "tiny-no-state:10",
+      "arm_b": "tiny:10",
+      "table": {
+        "both_succeed": 3,
+        "only_a": 1,
+        "only_b": 72,
+        "both_fail": 24
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.5670109524204556e-20
+    },
+    "tiny-no-wrist:10 vs tiny-wrong-text:10": {
+      "arm_a": "tiny-no-wrist:10",
+      "arm_b": "tiny-wrong-text:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 0,
+        "only_b": 1,
+        "both_fail": 99
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.0
+    },
+    "tiny-no-wrist:10 vs tiny:10": {
+      "arm_a": "tiny-no-wrist:10",
+      "arm_b": "tiny:10",
+      "table": {
+        "both_succeed": 0,
+        "only_a": 0,
+        "only_b": 75,
+        "both_fail": 25
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 5.293955920339377e-23
+    },
+    "tiny-wrong-text:10 vs tiny:10": {
+      "arm_a": "tiny-wrong-text:10",
+      "arm_b": "tiny:10",
+      "table": {
+        "both_succeed": 1,
+        "only_a": 0,
+        "only_b": 74,
+        "both_fail": 25
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.0587911840678754e-22
     }
   },
   "protocol": {
