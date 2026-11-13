@@ -151,6 +151,21 @@ PY=/home/keyu/Documents/ChatGPT/Mujuco/.venv/bin/python
 "$PY" plot_libero.py --suite libero_spatial
 ```
 
+Input ablations use the same paired runner and checkpoint:
+
+```bash
+PYTHONPATH= /home/keyu/Documents/ChatGPT/Mujuco/.venv/bin/python eval_libero.py \
+  --suite libero_spatial --inits 10 --tiny-ckpt runs/libero_tiny/latest.pt \
+  --arms tiny:10 tiny-blind:10 tiny-no-wrist:10 tiny-wrong-text:10 tiny-no-state:10
+```
+
+`blind` zeros both camera images; `no-wrist` zeros only `observation.images.image2`;
+`wrong-text` uses Spatial task `(i + 1) % 10`'s instruction in benchmark order,
+independent of task selection; `no-state` zeros the normalized state (the saved
+training normalization center). Each ablation is recorded in its model identity
+and appears as a separate arm in the shared JSONL, `--summary`, and results plot.
+Existing `tiny:10` episodes are reused when the checkpoint and protocol match.
+
 Defaults: 1,000 distillation steps at batch 16 (randomly selecting either camera),
 then 8,000 action-training steps at batch 32, horizon 16, AdamW at 3e-4, four-pixel
 random shifts on GPU, bf16 autocast, validation and atomic `latest.pt` every 250 steps.

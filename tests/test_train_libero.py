@@ -278,6 +278,55 @@ def fake_checkpoint(meta):
     return dict(config=asdict(c), model=MicroVLA(c).state_dict(), norm=meta["norm"], tokenizer=meta["tokenizer"], phase="train")
 
 
+@pytest.mark.parametrize("ablation", ["blind", "no-wrist", "wrong-text", "no-state"])
+@pytest.mark.parametrize("canonical", [False, True])
+def test_input_ablation_changes_only_requested_tensor(monkeypatch, ablation, canonical):
+    texts = [f"move mug {i}" for i in range(10)]
+    monkeypatch.setattr(tl, "spatial_tasks", lambda: texts)
+    meta = dict(tokenizer=tl.tokenizer(texts), norm={
+        k: dict(center=[3.] * n, scale=[2.] * n) for k, n in (("state", 8), ("action", 7))})
+    ckpt = fake_checkpoint(meta)
+    raw = {key: np.full((10, 24, 24, 3), 60 + i * 90, dtype=np.uint8)
+           for i, key in enumerate(tl.CAMERAS)}
+    raw.update({"observation.state": np.arange(80, dtype=np.float32).reshape(10, 8), "task": texts.copy()})
+    if canonical:
+        raw = {k: torch.from_numpy(v).permute(0, 3, 1, 2).float() / 255 if k in tl.CAMERAS
+               else torch.from_numpy(v) if isinstance(v, np.ndarray) else v for k, v in raw.items()}
+    before = {k: v.copy() if isinstance(v, (np.ndarray, list)) else v.clone() for k, v in raw.items()}
+    expected = list(tl.TinyPolicy(ckpt, "cpu").prepare(raw))
+    changed = {"blind": 0, "no-wrist": 0, "wrong-text": 2, "no-state": 1}[ablation]
+    if ablation == "no-wrist":
+        expected[0][:, 1].zero_()
+    elif ablation == "wrong-text":
+        expected[2] = torch.from_numpy(tl.tokenize(texts[1:] + texts[:1], meta["tokenizer"]))
+    else:
+        expected[changed].zero_()
+    policy = tl.TinyPolicy(ckpt, "cpu", ablation=ablation)
+    actual = policy.prepare(raw)
+    baseline = tl.TinyPolicy(ckpt, "cpu").prepare(raw)
+    assert not torch.equal(actual[changed], baseline[changed])
+    for a, e in zip(actual, expected):
+        torch.testing.assert_close(a, e, atol=0, rtol=0)
+        assert a.dtype == e.dtype and a.device == e.device
+    for key in raw:
+        if key == "task":
+            assert raw[key] == before[key]
+        else:
+            np.testing.assert_array_equal(raw[key], before[key])
+    # The same prepared tensors must reach inference, including through the queue.
+    seen = []
+    def sample(*obs, **kwargs):
+        seen.append(obs)
+        return torch.zeros(10, 4, 7)
+    monkeypatch.setattr(policy.model, "sample", sample)
+    policy.predict_action_chunk(raw, noise=torch.zeros(10, 4, 7), num_steps=2)
+    policy.predict_action_chunk = lambda batch: policy.model.sample(*batch["tiny_inputs"])
+    policy.select_action(raw)
+    for obs in seen:
+        for a, e in zip(obs, expected):
+            torch.testing.assert_close(a, e, atol=0, rtol=0)
+
+
 def test_adapter_input_resize_orientation_action_shape_and_gripper(source):
     meta = build(source)
     policy = tl.TinyPolicy(fake_checkpoint(meta), "cpu")
@@ -329,12 +378,17 @@ def test_protocol_model_split_old_rows_unchanged_on_disk(tmp_path, version):
     tiny = result("tiny:10")
     tiny["model_identity"] = {"checkpoint_path": "tiny.pt", "checkpoint_sha256": "hash"}
     ev.append_row(path, tiny)
+    for ablation in ("blind", "no-wrist", "wrong-text", "no-state"):
+        ev.append_row(path, {**tiny, "arm": f"tiny-{ablation}:10",
+                             "model_identity": {**tiny["model_identity"], "ablation": ablation}})
     rows = ev.read_rows(path)
     assert path.read_bytes().startswith(before)
     assert rows["nf4+trim:10", 0, 0]["protocol"] == rows["tiny:10", 0, 0]["protocol"] == protocol()
     assert rows["nf4+trim:10", 0, 0]["model_identity"] == dict(policy="pi05", revision="abc")
     summary = ev.summarize(rows.values())
     assert summary["paired"]["nf4+trim:10 vs tiny:10"]["complete_pairs"] == 1
+    assert len(summary["arms"]) == 6 and len(summary["paired"]) == 15
+    assert all(p["complete_pairs"] == 1 and p["incomplete_pairs"] == 0 for p in summary["paired"].values())
     conflict = {**tiny, "init_index": 1, "model_identity": {"checkpoint_sha256": "other"}}
     with pytest.raises(ValueError, match="identities"):
         ev.summarize([*rows.values(), conflict])

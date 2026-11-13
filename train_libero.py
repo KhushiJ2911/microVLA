@@ -303,8 +303,14 @@ class IdentityProcessor:
 
 class TinyPolicy(nn.Module):
     """LeRobot rollout adapter: canonical RGB/state in, raw relative 7-D commands out."""
-    def __init__(self, ckpt, device="cuda"):
+    def __init__(self, ckpt, device="cuda", ablation=None):
         super().__init__()
+        if ablation not in (None, "blind", "no-wrist", "wrong-text", "no-state"):
+            raise ValueError(f"Unknown tiny input ablation: {ablation}")
+        self.ablation = ablation
+        if ablation == "wrong-text":
+            texts = spatial_tasks()  # Benchmark order, independent of --tasks selection.
+            self.wrong_text = dict(zip(texts, texts[1:] + texts[:1]))
         self.model = MicroVLA(Config(**ckpt["config"])).to(device).eval()
         self.model.load_state_dict(ckpt["model"])
         self.norm, self.tok = ckpt["norm"], ckpt["tokenizer"]
@@ -331,8 +337,16 @@ class TinyPolicy(nn.Module):
                 (self.model.config.image_size,) * 2, Image.Resampling.BILINEAR))).permute(2, 0, 1) for im in x]))
         value = batch["observation.state"]
         state = torch.as_tensor(value.copy() if isinstance(value, np.ndarray) else value, device=device, dtype=torch.float32)
-        instr = torch.from_numpy(tokenize(batch["task"], self.tok)).to(device)
-        return torch.stack(images, 1).to(device), normalize(state, self.norm["state"]), instr
+        texts = [self.wrong_text[t] for t in batch["task"]] if self.ablation == "wrong-text" else batch["task"]
+        instr = torch.from_numpy(tokenize(texts, self.tok)).to(device)
+        images, state = torch.stack(images, 1).to(device), normalize(state, self.norm["state"])
+        if self.ablation == "blind":
+            images.zero_()
+        elif self.ablation == "no-wrist":
+            images[:, 1].zero_()  # CAMERAS[1] is observation.images.image2.
+        elif self.ablation == "no-state":
+            state.zero_()  # Saved training normalization center, not raw zero state.
+        return images, state, instr
 
     @torch.no_grad()
     def predict_action_chunk(self, batch, *, noise, num_steps):

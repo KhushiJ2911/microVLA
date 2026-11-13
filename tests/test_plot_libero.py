@@ -13,7 +13,7 @@ import plot_libero as plotter
 from eval_libero import normalize
 
 ROOT = Path(__file__).resolve().parents[1]
-ARMS = [*plotter.COLORS, "tiny:10"]
+ARMS = [*plotter.COLORS, "tiny:10", "tiny-blind:10", "tiny-no-wrist:10", "tiny-wrong-text:10", "tiny-no-state:10"]
 
 
 @pytest.fixture
@@ -24,7 +24,7 @@ def sample(tmp_path):
     return target
 
 
-@pytest.mark.parametrize("n_arms", [1, 2, 3, 4])
+@pytest.mark.parametrize("n_arms", [1, 2, 3, 4, 8])
 def test_render_synthetic_arms(sample, tmp_path, monkeypatch, n_arms):
     template = json.loads(sample.read_text().splitlines()[0])
     rows = []
@@ -35,9 +35,11 @@ def test_render_synthetic_arms(sample, tmp_path, monkeypatch, n_arms):
                        trim="+trim" in arm, steps=int(arm.split(":")[1]),
                        init_index=init, task_id=0, success=(init == i), episode_length=20 + 10 * init,
                        policy_calls=calls, mean_policy_latency_s=seconds)
-            if arm == "tiny:10":
+            if arm.startswith("tiny"):
                 row = normalize(row)
                 row["model_identity"] = dict(checkpoint_path="tiny.pt", checkpoint_sha256="synthetic")
+                if arm != "tiny:10":
+                    row["model_identity"]["ablation"] = arm.split(":")[0].removeprefix("tiny-")
             rows.append(row)
     # Only the first arm has task 9: every comparison involving it is incomplete.
     rows.append({**rows[0], "task_id": 9, "episode_length": 40})
@@ -51,7 +53,7 @@ def test_render_synthetic_arms(sample, tmp_path, monkeypatch, n_arms):
         target = plotter.plot()
         assert target == Path("assets/libero_results.png")
         with Image.open(target) as image:
-            assert image.format == "PNG" and image.size == (2560, 960)
+            assert image.format == "PNG" and image.width == 2560 and image.height >= 960
             assert image.convert("L").getextrema()[0] < 100
         fig = figures[-1]
         success, tasks, latency = fig.axes

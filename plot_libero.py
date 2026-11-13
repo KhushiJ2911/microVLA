@@ -31,7 +31,7 @@ def plot(suite="libero_spatial"):
         p = f"{comparison['mcnemar_exact_p']:.4g}" if n else "n/a"
         title.append(f"Paired McNemar {pair}: p={p} ({n} complete, "
                      f"{comparison['incomplete_pairs']} incomplete)")
-    fig, (success, tasks, latency) = plt.subplots(1, 3, figsize=(16, 6), layout="constrained")
+    fig, (success, tasks, latency) = plt.subplots(1, 3, figsize=(16, max(6, 4 + .2 * len(title))), layout="constrained")
     fig.suptitle("\n".join(title), fontsize=11)
     rates = [100 * v["rate"] for v in values]
     intervals = [wilson(v["successes"], v["episodes"]) for v in values]
@@ -62,11 +62,12 @@ def plot(suite="libero_spatial"):
         selected = [r["episode_length"] for r in rows if r["arm"] == arm]
         latency.annotate(f"{sum(selected) / len(selected):.1f} steps/episode",
                          (bar.get_x() + bar.get_width() / 2, ms if ms == ms else 0),
-                         xytext=(0, 5), textcoords="offset points", ha="center", fontsize=8)
+                         xytext=(0, 5), textcoords="offset points", ha="center", fontsize=8,
+                         rotation=90 if len(arms) > 4 else 0)
     latency.set(title="Mean policy latency per chunk", ylabel="Latency (ms)")
-    latency.margins(y=.2)
+    latency.margins(y=.6 if len(arms) > 4 else .2)
     for ax in (success, latency):
-        ax.tick_params(axis="x", labelrotation=15)
+        ax.tick_params(axis="x", labelrotation=45 if len(arms) > 4 else 15)
     target = Path("assets/libero_results.png")
     target.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(target, dpi=160)

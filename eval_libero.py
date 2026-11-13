@@ -14,8 +14,8 @@ def seed(suite, task, init, chunk):
     return int.from_bytes(hashlib.sha256(f"{suite}:{task}:{init}:{chunk}".encode()).digest()[:4], "little")
 
 def parse_arm(label):
-    if not re.fullmatch(r"(?:(?:nf4|offload-\d+(?:\.\d+)?)(?:\+trim)?|tiny):[1-9]\d*", label):
-        raise argparse.ArgumentTypeError("arm must be tiny:steps, nf4[+trim]:steps or offload-GiB[+trim]:steps")
+    if not re.fullmatch(r"(?:(?:nf4|offload-\d+(?:\.\d+)?)(?:\+trim)?|tiny(?:-(?:blind|no-wrist|wrong-text|no-state))?):[1-9]\d*", label):
+        raise argparse.ArgumentTypeError("arm must be tiny[-blind|-no-wrist|-wrong-text|-no-state]:steps, nf4[+trim]:steps or offload-GiB[+trim]:steps")
     placement, steps = label.split(":")
     if placement.startswith("offload-") and float(placement.removeprefix("offload-").removesuffix("+trim")) <= 0:
         raise argparse.ArgumentTypeError("offload budget must be positive")
@@ -205,6 +205,8 @@ def main():
     parser.add_argument("--summary", action="store_true", help="summarize all persisted episodes without loading policy/env")
     parser.add_argument("--max-steps", "--episode-length", type=int, help="policy actions, excluding settling")
     args = parser.parse_args()
+    if args.suite != "libero_spatial" and any(a.startswith("tiny-wrong-text:") for a in args.arms):
+        parser.error("tiny-wrong-text requires --suite libero_spatial")
     if len(set(args.arms)) != len(args.arms) or args.inits < 1 or args.videos < 0:
         parser.error("use unique arms, --inits >= 1, --videos >= 0")
     if min(args.replan, args.observation_height, args.observation_width, args.max_steps or 1) < 1 or args.max_steps == 0 or args.num_steps_wait < 0 or not 0 <= args.seed < 2**32:
@@ -224,7 +226,7 @@ def main():
     if any(r.get("protocol") != spec for r in rows.values()):
         raise ValueError("Resume log has incompatible protocol metadata; use another output directory when changing settings")
     config = next(iter(groups))
-    if config == "tiny":
+    if config == "tiny" or config.startswith("tiny-"):
         import torch
         from train_libero import TinyPolicy, IdentityProcessor
         digest = hashlib.sha256()
@@ -236,6 +238,8 @@ def main():
         if tiny_checkpoint.get("phase") != "train":
             raise ValueError("Tiny checkpoint has not completed any action training")
         identity = dict(checkpoint_path=str(args.tiny_ckpt.resolve()), checkpoint_sha256=digest.hexdigest())
+        if config.startswith("tiny-"):
+            identity["ablation"] = config.removeprefix("tiny-")
     else:
         identity = dict(policy=infer.POLICY, revision=infer.REVISION)
     if any(r.get("model_identity", identity) != identity for r in rows.values() if r["arm"] in args.arms):
@@ -258,8 +262,8 @@ def main():
                 steps = int(arm.split(":")[1])
                 if (arm, task, init) in rows: continue
                 if policy is None:
-                    if config == "tiny":
-                        policy = TinyPolicy(tiny_checkpoint)
+                    if config == "tiny" or config.startswith("tiny-"):
+                        policy = TinyPolicy(tiny_checkpoint, ablation=identity.get("ablation"))
                         del tiny_checkpoint
                         pre, post = IdentityProcessor(), IdentityProcessor()
                     else:

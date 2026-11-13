@@ -61,7 +61,8 @@ def test_seed_is_stable_independent_of_setting_and_global_rng():
     torch.manual_seed(12)
     before = torch.random.get_rng_state()
     noise = [torch.randn(1, 50, 32, generator=torch.Generator().manual_seed(ev.seed("libero_spatial", 2, 3, 4)))
-             for arm in ("nf4+trim:10", "nf4+trim:5", "offload-3.5:10")]
+             for arm in ("nf4+trim:10", "nf4+trim:5", "offload-3.5:10", "tiny:10", "tiny-blind:10",
+                         "tiny-no-wrist:10", "tiny-wrong-text:10", "tiny-no-state:10")]
     assert all(torch.equal(noise[0], n) for n in noise) and torch.equal(before, torch.random.get_rng_state())
     seeds = {ev.seed(s, t, i, c) for s in ("libero_spatial", "libero_goal")
              for t in range(2) for i in range(2) for c in (-1, 0, 1)}
@@ -377,13 +378,16 @@ def test_video_encoding_pairs_frames_and_holds_shorter_ending(tmp_path):
     assert frames[-1][-100, 400, 0] == pytest.approx(180, abs=3)
 
 
-@pytest.mark.parametrize("label", ["nf4+trim:10", "nf4:5", "offload-3.5:10", "offload-2.5+trim:5"])
+@pytest.mark.parametrize("label", ["nf4+trim:10", "nf4:5", "offload-3.5:10", "offload-2.5+trim:5", "tiny:10",
+                                  "tiny-blind:10", "tiny-no-wrist:5", "tiny-wrong-text:10", "tiny-no-state:10"])
 def test_parse_arm(label):
     assert ev.parse_arm(label) == label
 
 
 @pytest.mark.parametrize("label", ["bf16:10", "nf4:0", "nf4:-1", "nf4:1.5", "nf4:10:5",
-                                   "offload-0:10", "offload-nan:10", "offload--3.5:10", "nf4+trim"])
+                                   "offload-0:10", "offload-nan:10", "offload--3.5:10", "nf4+trim",
+                                   "tiny-unknown:10", "tiny-blind:0", "tiny-no-state:-1", "tiny+trim:10",
+                                   "tiny-blind+trim:10", "tiny-blind-no-state:10"])
 def test_invalid_arm(label):
     with pytest.raises(ev.argparse.ArgumentTypeError):
         ev.parse_arm(label)
@@ -392,6 +396,14 @@ def test_invalid_arm(label):
 def test_duplicate_arms_rejected(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(ev.sys, "argv", ["eval_libero.py", "--arms", "nf4:10", "nf4:10"])
+    with pytest.raises(SystemExit) as exc:
+        ev.main()
+    assert exc.value.code == 2 and not (tmp_path / "runs").exists()
+
+
+def test_wrong_text_rejects_other_suites_before_loading(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ev.sys, "argv", ["eval_libero.py", "--suite", "libero_goal", "--arms", "tiny-wrong-text:10"])
     with pytest.raises(SystemExit) as exc:
         ev.main()
     assert exc.value.code == 2 and not (tmp_path / "runs").exists()
@@ -608,7 +620,8 @@ def test_tiny_uses_same_rollout_seed_wait_queue_and_env_action_format(cpu_rollou
     assert policy.config.n_action_steps == 16
 
 
-def test_main_tiny_checkpoint_identity_resume_and_changed_hash(cpu_rollout, tmp_path, monkeypatch):
+@pytest.mark.parametrize("ablation", [None, "blind", "no-wrist", "wrong-text", "no-state"])
+def test_main_tiny_checkpoint_identity_resume_and_changed_hash(cpu_rollout, tmp_path, monkeypatch, ablation):
     from dataclasses import asdict
     import hashlib
     import train_libero as tl
@@ -623,23 +636,32 @@ def test_main_tiny_checkpoint_identity_resume_and_changed_hash(cpu_rollout, tmp_
     c = Config(image_size=16, num_cameras=2, vocab_size=6, horizon=16, state_dim=8, action_dim=7,
                width=32, depth=1, heads=2, head_dim=8, mlp=64, expert_width=16, expert_mlp=32,
                vit_width=16, vit_depth=1, vit_heads=2)
+    texts = ["move the mug", *[f"move mug {i}" for i in range(1, 10)]]
+    monkeypatch.setattr(tl, "spatial_tasks", lambda: texts)
+    tok = tl.tokenizer(texts)
+    c.vocab_size = len(tok["vocab"])
     checkpoint = dict(config=asdict(c), model=MicroVLA(c).state_dict(), phase="train",
                       norm={k: dict(center=[0.] * n, scale=[1.] * n) for k, n in (("state", 8), ("action", 7))},
-                      tokenizer=tl.tokenizer(["move the mug"]))
+                      tokenizer=tok)
     path = tmp_path / "tiny.pt"
     torch.save(checkpoint, path)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(ev.sys, "argv", ["eval_libero.py", "--arms", "tiny:10", "--tiny-ckpt", str(path), "--inits", "1", "--max-steps", "12"])
+    arm = f"tiny-{ablation}:10" if ablation else "tiny:10"
+    monkeypatch.setattr(ev.sys, "argv", ["eval_libero.py", "--arms", arm, "--tiny-ckpt", str(path), "--inits", "1", "--max-steps", "12"])
     make_calls = []
     monkeypatch.setattr(factory, "make_env", lambda *a, **kw: make_calls.append(1) or {"libero_spatial": {0: env}})
     monkeypatch.setattr(factory, "make_env_pre_post_processors", lambda *a: (tl.IdentityProcessor(), tl.IdentityProcessor()))
     real_policy, loaded = tl.TinyPolicy, []
-    monkeypatch.setattr(tl, "TinyPolicy", lambda ckpt: loaded.append(1) or real_policy(ckpt, "cpu"))
+    monkeypatch.setattr(tl, "TinyPolicy", lambda ckpt, **kw: loaded.append(kw) or real_policy(ckpt, "cpu", **kw))
     ev.main()
     log = tmp_path / "runs/libero_eval_libero_spatial.jsonl"
     before = log.read_bytes()
-    row = ev.read_rows(log)["tiny:10", 0, 0]
-    assert row["model_identity"] == dict(checkpoint_path=str(path), checkpoint_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    row = ev.read_rows(log)[arm, 0, 0]
+    identity = dict(checkpoint_path=str(path), checkpoint_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    if ablation:
+        identity["ablation"] = ablation
+    assert row["model_identity"] == identity
+    assert loaded == [{"ablation": ablation}]
     assert "policy" not in row["protocol"] and row["chunk_size"] == 16 and row["policy_calls"] == 3
     ev.main()
     assert log.read_bytes() == before and len(loaded) == 1
