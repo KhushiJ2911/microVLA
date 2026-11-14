@@ -1,8 +1,29 @@
 .venv/
+venv/
 __pycache__/
 *.pyc
+# Published episode JSONL/summaries already tracked in runs/ remain tracked.
+# Keep new run data, memmaps, TensorBoard events and checkpoints local.
 runs/
 checkpoints/
 *.pt
+*.pth
+*.ckpt
 *.safetensors
+.cache/
+.huggingface/
+*.log
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# Local credentials, agent state and editor/OS files.
+.env
+.env.*
+!.env.example
+.aws/
+.agents/
+.codex/
+.idea/
+.vscode/
+.DS_Store
+*~
