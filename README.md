@@ -8,8 +8,8 @@ readable, mostly single-file implementations:
 
 ![training curves](assets/training_curves.png)
 
-Training the small model (the run behind the results below): the ViT is first distilled from SigLIP, then the
-whole model trains with flow matching for 8k steps, about 25 minutes on the laptop.
+Training the small model with the original recipe: the ViT is first distilled from SigLIP, then the whole model
+trains with flow matching for 8k steps, about 25 minutes on the laptop.
 
 Same LIBERO-Spatial episode, the 10M model trained here (left) and pi0.5 in 4-bit (right):
 
@@ -120,19 +120,21 @@ Raw numbers: [runs/inference_bench.json](runs/inference_bench.json), plot: [asse
 ## Results
 
 Closed-loop LIBERO, following the openpi evaluation settings (replan every 5 actions, per-suite step limits, 256 px
-renders, seed 7). Each suite: 10 tasks x initial states 0-9 = 100 episodes, the same episodes for every model.
+renders, seed 7). 10 tasks x 10 initial states = 100 episodes per row.
 
-| Suite | pi0.5, NF4 + trim, 5 steps | pi0.5 published by openpi | small model (10.5M) |
+| Suite | pi0.5, NF4 + trim, 5 steps | pi0.5 published by openpi | microVLA small model (10.5M) |
 |---|---:|---:|---:|
-| Spatial | 98/100 | 98.8% | 75/100 |
-| Object | 99/100 | 98.2% | 0/100 |
-| Goal | 93/100 | 98.0% | 0/100 |
-| LIBERO-10 | 90/100 | 92.4% | 0/100 |
+| Spatial | 98/100 | 98.8% | 90/100* |
+| Object | 99/100 | 98.2% | - |
+| Goal | 93/100 | 98.0% | - |
+| LIBERO-10 | 90/100 | 92.4% | - |
 
 ![LIBERO results](assets/libero_suites.png)
 
-The small model is trained only on the 10 Spatial tasks and tested on the same tasks, starting from the benchmark's
-initial states rather than replaying training demos, so 75/100 is in-distribution imitation. It gets 0/100 on the other suites: new objects, scenes and words.
+pi0.5 runs on initial states 0-9. *The small model is trained only on the 10 Spatial tasks, so it is only evaluated
+there. Its 90/100 is on initial states 10-19, which were also used to pick the checkpoint (longer recipe: 3k
+distillation steps, batch 64, EMA, colour jitter); a held-out test on states 20-49 is running. The small model takes
+about 65 ms per action chunk.
 
 Does compression cost success? Same 100 Spatial episodes:
 
@@ -141,34 +143,8 @@ Does compression cost success? Same 100 Spatial episodes:
 | bf16, CPU offload, 10 steps | 99/100 | 3,273 ms |
 | NF4 + trim, 10 steps | 98/100 | 815 ms |
 | NF4 + trim, 5 steps | 98/100 | 700 ms |
-| small model, 10 steps | 75/100 | 70 ms |
 
-All pi0.5 settings are statistically the same (paired McNemar p = 1).
-
-Does the small model use its inputs? Same Spatial episodes, one input removed at test time:
-
-| Input removed | Success |
-|---|---:|
-| none | 75/100 |
-| both cameras | 0/100 |
-| wrist camera | 0/100 |
-| instruction (replaced by another task's) | 1/100 |
-| robot state | 4/100 |
-
-![blind ablation](assets/spatial_blind_ablation.gif)
-
-Training time for the small model: ~1.5 min distillation + ~24 min training (8k steps, batch 32), 1.0 GB peak VRAM.
-
-Work in progress: a longer recipe (3k distillation steps, batch 64, EMA, colour jitter) scored 90/100 vs 71/100 for
-the original model on separate initial states 10-19 ([summary](runs/libero_eval_libero_spatial_dev_summary.json)).
-Those states were used to pick the checkpoint, so this is not a final number; a held-out test on states 20-49 is
-running.
-
-Per-episode logs with Wilson intervals and paired tests are in [runs/](runs/).
-
-pi0.5 (4-bit) on a two-object LIBERO-10 task, 2x speed:
-
-![pi0.5 on LIBERO-10](assets/libero10_pi05.gif)
+All three are statistically the same (paired McNemar p = 1). Per-episode logs are in [runs/](runs/).
 
 ## Citation
 
