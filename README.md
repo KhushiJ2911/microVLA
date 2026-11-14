@@ -8,8 +8,8 @@ readable, mostly single-file implementations:
 
 ![training curves](assets/training_curves.png)
 
-Left: the small ViT is first distilled from SigLIP. Right: flow-matching loss. The original 8k-step run is the model
-in the results below. Training 30k steps keeps lowering train loss while held-out loss rises after ~5k steps.
+Training the small model (the run behind the results below): the ViT is first distilled from SigLIP, then the
+whole model trains with flow matching for 8k steps, about 25 minutes on the laptop.
 
 Same LIBERO-Spatial episode, the 10M model trained here (left) and pi0.5 in 4-bit (right):
 
