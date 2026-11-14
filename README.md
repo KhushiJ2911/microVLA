@@ -88,7 +88,7 @@ The small model ([train.py](train.py), LIBERO data and training in [train_libero
 
 | Part | Size |
 |---|---|
-| Vision | ViT, 4 layers, width 192, 8 px patches; 2 cameras (scene + wrist) at 96 px share it, plus a camera embedding |
+| Vision | ViT, 4 layers, width 192, 8 px patches; 2 cameras (scene + wrist) at 96 or 128 px share it, plus a camera embedding |
 | Prefix transformer | 6 layers, width 256, GeGLU MLP 1024 |
 | Action expert | 6 layers, width 128, adaRMSNorm conditioned on the flow time $t$ |
 | Attention | shared across prefix and expert in every layer, 4 query heads, 1 KV head, RoPE |
@@ -119,32 +119,24 @@ Raw numbers: [runs/inference_bench.json](runs/inference_bench.json), plot: [asse
 
 ## Results
 
-Closed-loop LIBERO, following the openpi evaluation settings (replan every 5 actions, per-suite step limits, 256 px
-renders, seed 7). 10 tasks x 10 initial states = 100 episodes per row.
+Closed-loop LIBERO-Spatial (10 tasks), following the openpi evaluation settings: replan every 5 actions, 220-step
+limit, 256 px renders, seed 7.
 
-| Suite | pi0.5, NF4 + trim, 5 steps | pi0.5 published by openpi | microVLA small model (10.5M) |
-|---|---:|---:|---:|
-| Spatial | 98/100 | 98.8% | 90/100* |
-| Object | 99/100 | 98.2% | - |
-| Goal | 93/100 | 98.0% | - |
-| LIBERO-10 | 90/100 | 92.4% | - |
+![LIBERO-Spatial results](assets/libero_spatial.png)
 
-![LIBERO results](assets/libero_suites.png)
-
-pi0.5 runs on initial states 0-9. *The small model is trained only on the 10 Spatial tasks, so it is only evaluated
-there. Its 90/100 is on initial states 10-19, which were also used to pick the checkpoint (longer recipe: 3k
-distillation steps, batch 64, EMA, colour jitter); a held-out test on states 20-49 is running. The small model takes
-about 65 ms per action chunk.
-
-Does compression cost success? Same 100 Spatial episodes:
-
-| pi0.5 setting | Success | Mean model time per chunk in rollouts |
+| Model | Success | Mean model time per action chunk |
 |---|---:|---:|
-| bf16, CPU offload, 10 steps | 99/100 | 3,273 ms |
-| NF4 + trim, 10 steps | 98/100 | 815 ms |
-| NF4 + trim, 5 steps | 98/100 | 700 ms |
+| pi0.5 bf16, CPU offload, 10 flow steps | 99/100 | 3,273 ms |
+| pi0.5 NF4 + trim, 10 flow steps | 98/100 | 815 ms |
+| pi0.5 NF4 + trim, 5 flow steps | 98/100 | 700 ms |
+| pi0.5 published by openpi | 98.8% | - |
+| microVLA small model (10.5M) | 91/100* | 73 ms |
 
-All three are statistically the same (paired McNemar p = 1). Per-episode logs are in [runs/](runs/).
+pi0.5 runs on initial states 0-9 (the same 100 episodes for every setting); all three settings are statistically the
+same (paired McNemar p = 1), so the 4-bit, 5-step version loses nothing measurable. *The small model is trained on
+the Spatial demos and evaluated on the same tasks from the benchmark's initial states. Its 91/100 is on states 10-19,
+which were also used to pick the checkpoint (3k distillation steps, then 10k steps at batch 64 with EMA and colour
+jitter, 128 px images); a held-out test on states 20-49 is running. Per-episode logs are in [runs/](runs/).
 
 ## Citation
 
