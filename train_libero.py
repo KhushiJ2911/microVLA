@@ -21,7 +21,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from train import Config, MicroVLA, autocast, parameter_counts
+from train import Config, MicroVLA, autocast, make_logger, parameter_counts
 
 REVISION = "86958911c0f959db2bbbdb107eb3e17c5f9c798e"
 REPO = "HuggingFaceVLA/libero"
@@ -491,6 +491,9 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--logger", choices=("tensorboard", "wandb", "none"), default="tensorboard")
+    parser.add_argument("--wandb-project", default="microvla")
+    parser.add_argument("--wandb-run-name")
     args = parser.parse_args()
     if args.stream and not args.preprocess:
         parser.error("--stream requires --preprocess")
@@ -526,8 +529,7 @@ def main():
     print(json.dumps(dict(parameters=parameter_counts(model), cache_bytes=data.meta["cache_bytes"],
                           estimated_hours=(args.steps / 1.2 + args.distill_steps / 1.0) / 3600,
                           estimate="unmeasured 3050 heuristic; measured ETA follows after 50 steps")), flush=True)
-    from torch.utils.tensorboard import SummaryWriter
-    writer = SummaryWriter(str(args.runs / "tb"), flush_secs=10)
+    writer = make_logger(args, settings, c, args.runs / "tb")
     try:
         for phase, total in (("distill", args.distill_steps), ("train", args.steps)):
             if not total or (ckpt and ckpt["phase"] == "train" and phase == "distill"):

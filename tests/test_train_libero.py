@@ -644,7 +644,8 @@ def test_live_log_compatibility_on_copy_only(tmp_path):
 
 
 @pytest.mark.parametrize("extras", [[], ["--ema", ".9", "--save-every", "1", "--color-jitter"]])
-def test_cli_cpu_training_and_resume(source, tmp_path, monkeypatch, extras):
+@pytest.mark.parametrize("logger", [None, "wandb", "none"])
+def test_cli_cpu_training_and_resume(source, tmp_path, monkeypatch, extras, logger, fake_wandb):
     build(source)
     monkeypatch.chdir(tmp_path)
     baseline = tmp_path / "runs/libero_tiny/latest.pt"
@@ -656,11 +657,16 @@ def test_cli_cpu_training_and_resume(source, tmp_path, monkeypatch, extras):
     command = ["train_libero.py", "--cache", str(source[1]), "--runs", str(runs), "--device", "cpu",
                "--steps", "2", "--distill-steps", "0", "--batch-size", "2", "--horizon", "4"]
     command += extras
+    if logger:
+        command += ["--logger", logger]
     monkeypatch.setattr("sys.argv", command)
     tl.main()
     saved = torch.load(runs / "latest.pt", weights_only=True)
     assert saved["step"] == 2 and saved["phase"] == "train"
-    assert (runs / "tb").exists()
+    if logger == "wandb":
+        assert fake_wandb.runs[0].kwargs["config"] == {**saved["settings"], "model_config": saved["config"]}
+    assert (runs / "tb").exists() == (logger is None)
+    assert (runs / "wandb_run_id").exists() == (logger == "wandb")
     assert baseline.read_bytes() == b"existing baseline checkpoint"
     if extras:
         for step in (1, 2):
@@ -680,6 +686,14 @@ def test_cli_cpu_training_and_resume(source, tmp_path, monkeypatch, extras):
     monkeypatch.setattr("sys.argv", [*command, "--resume"])
     tl.main()
     assert (runs / "latest.pt").read_bytes() == before
+    if logger == "wandb":
+        first, resumed = fake_wandb.runs
+        assert first.id == resumed.id == (runs / "wandb_run_id").read_text()
+        assert resumed.kwargs["id"] == first.id and resumed.kwargs["resume"] == "allow"
+        assert {next(iter(data)) for data, step in first.logs if step == 2} == {"train/loss", "val/loss"}
+        assert all(run.finished for run in fake_wandb.runs)
+    else:
+        assert not fake_wandb.runs
 
 
 @pytest.mark.parametrize("ema", [False, True])

@@ -6,10 +6,33 @@ import json
 import math
 from pathlib import Path
 import time
+from types import SimpleNamespace
 
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
+
+
+def make_logger(args, settings, model_config, logdir):
+    """Keep scalar logging identical across backends; persist W&B identity beside checkpoints."""
+    if args.logger == "tensorboard":
+        from torch.utils.tensorboard import SummaryWriter
+        return SummaryWriter(str(logdir), flush_secs=10)
+    if args.logger == "none":
+        return SimpleNamespace(add_scalar=lambda tag, value, step: None, close=lambda: None)
+    import wandb
+    runs = Path(args.runs)
+    runs.mkdir(parents=True, exist_ok=True)
+    path = runs / "wandb_run_id"
+    run_id = path.read_text().strip() if args.resume and path.exists() else None
+    run = wandb.init(project=args.wandb_project, name=args.wandb_run_name,
+                     config={**settings, "model_config": asdict(model_config)}, dir=str(runs),
+                     id=run_id, resume="allow" if args.resume else None)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(run.id)
+    tmp.replace(path)
+    return SimpleNamespace(add_scalar=lambda tag, value, step: run.log({tag: value}, step=step),
+                           close=run.finish)
 
 
 @dataclass
@@ -369,6 +392,9 @@ def main() -> None:
     parser.add_argument("--flow-steps", type=int, default=10)
     parser.add_argument("--runs", default="runs")
     parser.add_argument("--logdir", default="runs/tb", help="TensorBoard log dir")
+    parser.add_argument("--logger", choices=("tensorboard", "wandb", "none"), default="tensorboard")
+    parser.add_argument("--wandb-project", default="microvla")
+    parser.add_argument("--wandb-run-name")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--overfit", action="store_true")
@@ -391,110 +417,113 @@ def main() -> None:
     print(json.dumps(parameter_counts(model)))
     runs = Path(args.runs)
     runs.mkdir(parents=True, exist_ok=True)
-    from torch.utils.tensorboard import SummaryWriter
-    writer = SummaryWriter(args.logdir, flush_secs=10)
-    if args.distill_steps:
-        distill_vision(model, sim, device, args.distill_steps, runs / "vit_distilled.pt", writer)
-    data = sim.collect(args.episodes, c.horizon, args.noise, args.seed, device)
-    # Validation: unseen episodes (different seed), fixed noise and t so the curve is low-variance.
-    val = sim.collect(max(1, args.episodes // 10), c.horizon, args.noise, args.seed + 1, device)
-    vidx = torch.randperm(len(val["scene"]), device=device)[:1024]
-    val = {k: v[vidx] for k, v in val.items()}
-    val["noise"] = torch.randn_like(val["actions"])
-    val["t"] = torch.rand(len(vidx), device=device).pow(2 / 3) * 0.999 + 0.001
+    settings = vars(args).copy()
+    writer = make_logger(args, settings, c, args.logdir)
+    try:
+        if args.distill_steps:
+            distill_vision(model, sim, device, args.distill_steps, runs / "vit_distilled.pt", writer)
+        data = sim.collect(args.episodes, c.horizon, args.noise, args.seed, device)
+        # Validation: unseen episodes (different seed), fixed noise and t so the curve is low-variance.
+        val = sim.collect(max(1, args.episodes // 10), c.horizon, args.noise, args.seed + 1, device)
+        vidx = torch.randperm(len(val["scene"]), device=device)[:1024]
+        val = {k: v[vidx] for k, v in val.items()}
+        val["noise"] = torch.randn_like(val["actions"])
+        val["t"] = torch.rand(len(vidx), device=device).pow(2 / 3) * 0.999 + 0.001
 
-    @torch.no_grad()
-    def validate() -> tuple[float, float]:
-        """Val flow loss, and cosine between sampled and expert first moves (learns long before success)."""
-        model.eval()
-        s, obs = val["scene"], (sim.render(val["scene"]), sim.robot_state(val["scene"]), sim.encode_instruction(val["task"]))
-        with autocast(device), torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
-            loss = model.loss(*obs, val["actions"], val["noise"], val["t"])
-            torch.manual_seed(0)
-            moves = model.sample(*obs, args.flow_steps)[:, 0, :2].float()
-        model.train()
-        return loss.item(), F.cosine_similarity(moves, val["actions"][:, 0, :2]).mean().item()
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-    metrics, first_step = [], 1
-    if args.resume and (runs / "latest.pt").exists():
-        ckpt = torch.load(runs / "latest.pt", map_location=device, weights_only=True)
-        model.load_state_dict(ckpt["model"])
-        opt.load_state_dict(ckpt["opt"])
-        first_step = ckpt["step"] + 1
-        metrics = [m for m in json.loads((runs / "metrics.json").read_text()) if m["step"] <= ckpt["step"]]
-        print(f"resumed from step {ckpt['step']}")
+        @torch.no_grad()
+        def validate() -> tuple[float, float]:
+            """Val flow loss, and cosine between sampled and expert first moves (learns long before success)."""
+            model.eval()
+            s, obs = val["scene"], (sim.render(val["scene"]), sim.robot_state(val["scene"]), sim.encode_instruction(val["task"]))
+            with autocast(device), torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
+                loss = model.loss(*obs, val["actions"], val["noise"], val["t"])
+                torch.manual_seed(0)
+                moves = model.sample(*obs, args.flow_steps)[:, 0, :2].float()
+            model.train()
+            return loss.item(), F.cosine_similarity(moves, val["actions"][:, 0, :2]).mean().item()
+        opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+        metrics, first_step = [], 1
+        if args.resume and (runs / "latest.pt").exists():
+            ckpt = torch.load(runs / "latest.pt", map_location=device, weights_only=True)
+            model.load_state_dict(ckpt["model"])
+            opt.load_state_dict(ckpt["opt"])
+            first_step = ckpt["step"] + 1
+            metrics = [m for m in json.loads((runs / "metrics.json").read_text()) if m["step"] <= ckpt["step"]]
+            print(f"resumed from step {ckpt['step']}")
 
-    def save(step: int, path: Path) -> None:
-        state = {"config": asdict(c), "model": model.state_dict(), "opt": opt.state_dict(), "step": step}
-        torch.save(state, runs / "latest.tmp")
-        (runs / "latest.tmp").replace(runs / "latest.pt")  # atomic: a crash mid-write never corrupts latest.pt
-        if path.name != "latest.pt":
-            torch.save(state, path)
-        (runs / "metrics.json").write_text(json.dumps(metrics, indent=2))
-    if args.compile:
-        model.forward = torch.compile(model.forward)
-    def checkpoint(step: int) -> None:
-        model.eval()
-        def policy(images, state, instr):
-            with autocast(device):
-                return model.sample(images, state, instr, args.flow_steps)
-        row = {"step": step}
-        with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
-            for name, split, swap in (("train", "train", False), ("heldout", "heldout", False), ("swap", "train", True)):
-                torch.manual_seed(args.seed + 1)
-                row[name] = sim.evaluate(policy, args.eval_episodes, args.seed + 1, device, split=split, swap=swap)["success"]
-        metrics.append(row)
-        print(json.dumps(row))
-        for name in ("train", "heldout", "swap"):
-            writer.add_scalar(f"success/{name}", row[name], step)
-        save(step, runs / f"ckpt_{step}.pt")
-        model.train()
-    fixed = torch.randint(len(data["scene"]), (args.batch_size,), device=device)
-    fixed_noise = torch.randn(args.batch_size, c.horizon, c.action_dim, device=device)
-    fixed_t = torch.rand(args.batch_size, device=device) * 0.998 + 0.001
-    if first_step == 1:
-        checkpoint(0)
-    start, accumulated = time.perf_counter(), torch.zeros((), device=device)
-    if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats()
-    for step in range(first_step, args.steps + 1):
-        idx = fixed if args.overfit else torch.randint(len(data["scene"]), (args.batch_size,), device=device)
-        scene = data["scene"][idx]
-        images, state, instr = sim.render(scene), sim.robot_state(scene), sim.encode_instruction(data["task"][idx])
-        actions = data["actions"][idx]
-        opt.zero_grad(set_to_none=True)
-        with autocast(device):
-            loss = model.loss(images, state, instr, actions, *((fixed_noise, fixed_t) if args.overfit else ()))
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        warmup = min(100, max(1, args.steps // 10))
-        lr = args.lr * min(step / warmup, 1) * (0.1 + 0.9 * (1 + math.cos(math.pi * max(0, step - warmup) / max(1, args.steps - warmup))) / 2)
-        for group in opt.param_groups:
-            group["lr"] = lr
-        opt.step()
-        accumulated += loss.detach()
-        if step % 100 == 0 or step == args.steps:
-            mean_loss = accumulated.item() / (100 if step % 100 == 0 else step % 100)
-            elapsed = time.perf_counter() - start
-            count = 100 if step % 100 == 0 else step % 100
-            vloss, vcos = validate()
-            row = {"step": step, "loss": mean_loss, "val_loss": vloss, "val_dir_cos": vcos, "lr": lr,
-                   "steps/s": count / elapsed, "samples/s": count * args.batch_size / elapsed,
-                   "peak_vram_mb": torch.cuda.max_memory_allocated() / 2**20 if device.type == "cuda" else 0.0}
-            print(json.dumps(row), flush=True)
-            for key, tag in (("loss", "loss/train"), ("val_loss", "loss/val"), ("val_dir_cos", "val/direction_cosine"), ("lr", "opt/lr"),
-                             ("steps/s", "perf/steps_per_s"), ("samples/s", "perf/samples_per_s"),
-                             ("peak_vram_mb", "perf/peak_vram_mb")):
-                writer.add_scalar(tag, row[key], step)
+        def save(step: int, path: Path) -> None:
+            state = {"config": asdict(c), "settings": settings, "model": model.state_dict(), "opt": opt.state_dict(), "step": step}
+            torch.save(state, runs / "latest.tmp")
+            (runs / "latest.tmp").replace(runs / "latest.pt")  # atomic: a crash mid-write never corrupts latest.pt
+            if path.name != "latest.pt":
+                torch.save(state, path)
+            (runs / "metrics.json").write_text(json.dumps(metrics, indent=2))
+        if args.compile:
+            model.forward = torch.compile(model.forward)
+        def checkpoint(step: int) -> None:
+            model.eval()
+            def policy(images, state, instr):
+                with autocast(device):
+                    return model.sample(images, state, instr, args.flow_steps)
+            row = {"step": step}
+            with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
+                for name, split, swap in (("train", "train", False), ("heldout", "heldout", False), ("swap", "train", True)):
+                    torch.manual_seed(args.seed + 1)
+                    row[name] = sim.evaluate(policy, args.eval_episodes, args.seed + 1, device, split=split, swap=swap)["success"]
             metrics.append(row)
-            accumulated.zero_()
-            start = time.perf_counter()
-        if step % args.eval_every == 0 or step in (args.steps // 2, args.steps):
-            eval_start = time.perf_counter()
-            checkpoint(step)
-            start += time.perf_counter() - eval_start
-        elif step % 250 == 0:
-            save(step, runs / "latest.pt")
+            print(json.dumps(row))
+            for name in ("train", "heldout", "swap"):
+                writer.add_scalar(f"success/{name}", row[name], step)
+            save(step, runs / f"ckpt_{step}.pt")
+            model.train()
+        fixed = torch.randint(len(data["scene"]), (args.batch_size,), device=device)
+        fixed_noise = torch.randn(args.batch_size, c.horizon, c.action_dim, device=device)
+        fixed_t = torch.rand(args.batch_size, device=device) * 0.998 + 0.001
+        if first_step == 1:
+            checkpoint(0)
+        start, accumulated = time.perf_counter(), torch.zeros((), device=device)
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+        for step in range(first_step, args.steps + 1):
+            idx = fixed if args.overfit else torch.randint(len(data["scene"]), (args.batch_size,), device=device)
+            scene = data["scene"][idx]
+            images, state, instr = sim.render(scene), sim.robot_state(scene), sim.encode_instruction(data["task"][idx])
+            actions = data["actions"][idx]
+            opt.zero_grad(set_to_none=True)
+            with autocast(device):
+                loss = model.loss(images, state, instr, actions, *((fixed_noise, fixed_t) if args.overfit else ()))
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            warmup = min(100, max(1, args.steps // 10))
+            lr = args.lr * min(step / warmup, 1) * (0.1 + 0.9 * (1 + math.cos(math.pi * max(0, step - warmup) / max(1, args.steps - warmup))) / 2)
+            for group in opt.param_groups:
+                group["lr"] = lr
+            opt.step()
+            accumulated += loss.detach()
+            if step % 100 == 0 or step == args.steps:
+                mean_loss = accumulated.item() / (100 if step % 100 == 0 else step % 100)
+                elapsed = time.perf_counter() - start
+                count = 100 if step % 100 == 0 else step % 100
+                vloss, vcos = validate()
+                row = {"step": step, "loss": mean_loss, "val_loss": vloss, "val_dir_cos": vcos, "lr": lr,
+                       "steps/s": count / elapsed, "samples/s": count * args.batch_size / elapsed,
+                       "peak_vram_mb": torch.cuda.max_memory_allocated() / 2**20 if device.type == "cuda" else 0.0}
+                print(json.dumps(row), flush=True)
+                for key, tag in (("loss", "loss/train"), ("val_loss", "loss/val"), ("val_dir_cos", "val/direction_cosine"), ("lr", "opt/lr"),
+                                 ("steps/s", "perf/steps_per_s"), ("samples/s", "perf/samples_per_s"),
+                                 ("peak_vram_mb", "perf/peak_vram_mb")):
+                    writer.add_scalar(tag, row[key], step)
+                metrics.append(row)
+                accumulated.zero_()
+                start = time.perf_counter()
+            if step % args.eval_every == 0 or step in (args.steps // 2, args.steps):
+                eval_start = time.perf_counter()
+                checkpoint(step)
+                start += time.perf_counter() - eval_start
+            elif step % 250 == 0:
+                save(step, runs / "latest.pt")
+    finally:
+        writer.close()
 
 
 if __name__ == "__main__":

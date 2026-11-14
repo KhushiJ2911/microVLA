@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+import train
 from train import Config, MicroVLA, attention_mask, parameter_counts
 
 
@@ -139,3 +140,38 @@ def test_default_parameter_count():
     print(f"default parameter counts: {counts}")
     assert counts["total"] == sum(counts[name] for name in counts if name != "total")
     assert 10_000_000 <= counts["total"] <= 20_000_000
+
+
+@pytest.mark.parametrize("logger", [None, "wandb", "none"])
+def test_cli_cpu_training_and_resume(tmp_path, monkeypatch, logger, fake_wandb):
+    import sim
+    monkeypatch.chdir(tmp_path)
+    original = train.Config
+    monkeypatch.setattr(train, "Config", lambda **kwargs: original(**{**vars(tiny_config()), **kwargs}))
+    monkeypatch.setattr(sim, "evaluate", lambda *args, **kwargs: {"success": .5})
+    runs, logdir = tmp_path / "training", tmp_path / "tb"
+    command = ["train.py", "--runs", str(runs), "--logdir", str(logdir), "--device", "cpu",
+               "--steps", "2", "--episodes", "2", "--distill-steps", "0", "--batch-size", "2",
+               "--flow-steps", "1"]
+    if logger:
+        command += ["--logger", logger]
+    monkeypatch.setattr("sys.argv", command)
+    train.main()
+    saved = torch.load(runs / "latest.pt", weights_only=True)
+    assert saved["step"] == 2
+    assert saved["settings"]["logger"] == (logger or "tensorboard")
+    assert logdir.exists() == (logger is None)
+    assert (runs / "wandb_run_id").exists() == (logger == "wandb")
+    before = (runs / "latest.pt").read_bytes()
+    monkeypatch.setattr("sys.argv", [*command, "--resume"])
+    train.main()
+    assert (runs / "latest.pt").read_bytes() == before
+    if logger == "wandb":
+        first, resumed = fake_wandb.runs
+        assert first.id == resumed.id == (runs / "wandb_run_id").read_text()
+        assert resumed.kwargs["id"] == first.id and resumed.kwargs["resume"] == "allow"
+        assert first.kwargs["config"] == {**saved["settings"], "model_config": saved["config"]}
+        assert [step for data, step in first.logs if "loss/train" in data] == [2]
+        assert all(run.finished for run in fake_wandb.runs)
+    else:
+        assert not fake_wandb.runs
