@@ -6,10 +6,10 @@ readable, mostly single-file implementations:
 - a ~10M-parameter pi0.5-style model trained from scratch on LIBERO-Spatial demos, and
 - the real pi0.5 (3B) running on the same 4 GB GPU.
 
-![training curves](assets/training_curves.png)
+![overview](assets/overview.png)
 
-Training the small model with the original recipe: the ViT is first distilled from SigLIP, then the whole model
-trains with flow matching for 8k steps, about 25 minutes on the laptop.
+Left: each change we made to run pi0.5 on the 4 GB GPU, and the time per 50-action chunk after it (median on cached
+frames). Right: training the small model with the original recipe, 8k steps, about 25 minutes on the laptop.
 
 Same LIBERO-Spatial episode, the 10M model trained here (left) and pi0.5 in 4-bit (right):
 
