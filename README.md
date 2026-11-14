@@ -1,7 +1,6 @@
 # microVLA
 
-This repo aims to minimally implement VLA training and inference on my laptop GPU (RTX 3050, 4 GB), with small,
-readable, mostly single-file implementations:
+This repo aims to minimally implement VLA training and inference on a RTX 3050(4 GB) card, with pure PyTorch implementations:
 
 - a ~10M-parameter pi0.5-style model trained from scratch on LIBERO-Spatial demos, and
 - the real pi0.5 (3B) running on the same 4 GB GPU.
