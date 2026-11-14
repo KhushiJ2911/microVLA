@@ -18,8 +18,7 @@ Same LIBERO-Spatial episode, the 10M model trained here (left) and pi0.5 in 4-bi
 ## How to run
 
 Python 3.12, Linux, a CUDA GPU. Install with [uv](https://docs.astral.sh/uv/); versions are pinned in
-`pyproject.toml` / `uv.lock`. A fresh install has not been tested on another machine yet.
-
+`pyproject.toml` / `uv.lock`. 
 ```bash
 git clone https://github.com/KhushiJ2911/microVLA.git && cd microVLA
 uv sync
