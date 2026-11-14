@@ -128,13 +128,16 @@ limit, 256 px renders, seed 7.
 | pi0.5 NF4 + trim, 10 flow steps | 98/100 | 815 ms |
 | pi0.5 NF4 + trim, 5 flow steps | 98/100 | 700 ms |
 | pi0.5 published by openpi | 98.8% | - |
-| microVLA small model (10.5M) | 91/100* | 73 ms |
+| microVLA small model (10.5M) | 270/300 (90%) | 79 ms |
 
 pi0.5 runs on initial states 0-9 (the same 100 episodes for every setting); all three settings are statistically the
-same (paired McNemar p = 1), so the 4-bit, 5-step version loses nothing measurable. *The small model is trained on
-the Spatial demos and evaluated on the same tasks from the benchmark's initial states. Its 91/100 is on states 10-19,
-which were also used to pick the checkpoint (3k distillation steps, then 10k steps at batch 64 with EMA and colour
-jitter, 128 px images); a held-out test on states 20-49 is running. Per-episode logs are in [runs/](runs/).
+same (paired McNemar p = 1), so the 4-bit, 5-step version loses nothing measurable.
+
+The small model is trained on the Spatial demos and evaluated on the same 10 tasks, starting from the benchmark's
+initial states. States 0-19 were used while developing it, so its number is from a single run on the untouched
+states 20-49 (95% interval 86-93%). The first version (1k distillation steps, 8k steps at batch 32, 96 px) got
+210/300 on the same episodes; 3k distillation steps, 10k steps at batch 64 with EMA and colour jitter, and 128 px
+images raised it to 270/300. Per-episode logs are in [runs/](runs/).
 
 ## Citation
 
