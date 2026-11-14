@@ -1,0 +1,391 @@
+{
+  "arms": {
+    "tiny@v1:10": {
+      "episodes": 100,
+      "successes": 71,
+      "rate": 0.71,
+      "wilson95": [
+        0.6146110882442888,
+        0.7898516425087772
+      ],
+      "model_identity": {
+        "checkpoint_path": "/home/keyu/Documents/ChatGPT/Mujuco/.worktrees/infer/runs/libero_tiny/latest.pt",
+        "checkpoint_sha256": "dc4a45c6585a0054e0938edd52fd440a277503e164ad6aaa64a587f315e14be0"
+      },
+      "mean_policy_latency_s": 0.06530501896323497
+    },
+    "tiny@v2_10k:10": {
+      "episodes": 100,
+      "successes": 90,
+      "rate": 0.9,
+      "wilson95": [
+        0.8256343384950865,
+        0.9447708629393249
+      ],
+      "model_identity": {
+        "checkpoint_path": "/home/keyu/Documents/ChatGPT/Mujuco/.worktrees/infer/runs/libero_tiny_v2/step_10000.pt",
+        "checkpoint_sha256": "5d61132c5886b2321be8ee7ad2eaca684ef99d2d1f71ada50672462d035e4a62"
+      },
+      "mean_policy_latency_s": 0.06422861365981807
+    },
+    "tiny@v2_20k:10": {
+      "episodes": 100,
+      "successes": 85,
+      "rate": 0.85,
+      "wilson95": [
+        0.7671644040916763,
+        0.9069401471634337
+      ],
+      "model_identity": {
+        "checkpoint_path": "/home/keyu/Documents/ChatGPT/Mujuco/.worktrees/infer/runs/libero_tiny_v2/step_20000.pt",
+        "checkpoint_sha256": "00bb20b394aecf2f01465daba2fcc43bd78e3d405ae949819e83cd7100b689e2"
+      },
+      "mean_policy_latency_s": 0.06408503271439829
+    },
+    "tiny@v2_30k:10": {
+      "episodes": 100,
+      "successes": 88,
+      "rate": 0.88,
+      "wilson95": [
+        0.8018790057328857,
+        0.9300059356298052
+      ],
+      "model_identity": {
+        "checkpoint_path": "/home/keyu/Documents/ChatGPT/Mujuco/.worktrees/infer/runs/libero_tiny_v2/step_30000.pt",
+        "checkpoint_sha256": "523b04880cdebb36e41d0295e13fba4120d46d4a581801b7c6c8ffe2df3ed8b0"
+      },
+      "mean_policy_latency_s": 0.06476411704233562
+    }
+  },
+  "per_task": {
+    "0": {
+      "task_text": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+      "tiny@v1:10": [
+        9,
+        10
+      ],
+      "tiny@v2_10k:10": [
+        9,
+        10
+      ],
+      "tiny@v2_20k:10": [
+        10,
+        10
+      ],
+      "tiny@v2_30k:10": [
+        9,
+        10
+      ]
+    },
+    "1": {
+      "task_text": "pick up the black bowl next to the ramekin and place it on the plate",
+      "tiny@v1:10": [
+        9,
+        10
+      ],
+      "tiny@v2_10k:10": [
+        10,
+        10
+      ],
+      "tiny@v2_20k:10": [
+        9,
+        10
+      ],
+      "tiny@v2_30k:10": [
+        10,
+        10
+      ]
+    },
+    "2": {
+      "task_text": "pick up the black bowl from table center and place it on the plate",
+      "tiny@v1:10": [
+        9,
+        10
+      ],
+      "tiny@v2_10k:10": [
+        10,
+        10
+      ],
+      "tiny@v2_20k:10": [
+        10,
+        10
+      ],
+      "tiny@v2_30k:10": [
+        10,
+        10
+      ]
+    },
+    "3": {
+      "task_text": "pick up the black bowl on the cookie box and place it on the plate",
+      "tiny@v1:10": [
+        7,
+        10
+      ],
+      "tiny@v2_10k:10": [
+        9,
+        10
+      ],
+      "tiny@v2_20k:10": [
+        9,
+        10
+      ],
+      "tiny@v2_30k:10": [
+        10,
+        10
+      ]
+    },
+    "4": {
+      "task_text": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "tiny@v1:10": [
+        3,
+        10
+      ],
+      "tiny@v2_10k:10": [
+        8,
+        10
+      ],
+      "tiny@v2_20k:10": [
+        7,
+        10
+      ],
+      "tiny@v2_30k:10": [
+        9,
+        10
+      ]
+    },
+    "5": {
+      "task_text": "pick up the black bowl on the ramekin and place it on the plate",
+      "tiny@v1:10": [
+        1,
+        10
+      ],
+      "tiny@v2_10k:10": [
+        5,
+        10
+      ],
+      "tiny@v2_20k:10": [
+        4,
+        10
+      ],
+      "tiny@v2_30k:10": [
+        3,
+        10
+      ]
+    },
+    "6": {
+      "task_text": "pick up the black bowl next to the cookie box and place it on the plate",
+      "tiny@v1:10": [
+        10,
+        10
+      ],
+      "tiny@v2_10k:10": [
+        10,
+        10
+      ],
+      "tiny@v2_20k:10": [
+        10,
+        10
+      ],
+      "tiny@v2_30k:10": [
+        9,
+        10
+      ]
+    },
+    "7": {
+      "task_text": "pick up the black bowl on the stove and place it on the plate",
+      "tiny@v1:10": [
+        9,
+        10
+      ],
+      "tiny@v2_10k:10": [
+        10,
+        10
+      ],
+      "tiny@v2_20k:10": [
+        9,
+        10
+      ],
+      "tiny@v2_30k:10": [
+        9,
+        10
+      ]
+    },
+    "8": {
+      "task_text": "pick up the black bowl next to the plate and place it on the plate",
+      "tiny@v1:10": [
+        7,
+        10
+      ],
+      "tiny@v2_10k:10": [
+        10,
+        10
+      ],
+      "tiny@v2_20k:10": [
+        9,
+        10
+      ],
+      "tiny@v2_30k:10": [
+        9,
+        10
+      ]
+    },
+    "9": {
+      "task_text": "pick up the black bowl on the wooden cabinet and place it on the plate",
+      "tiny@v1:10": [
+        7,
+        10
+      ],
+      "tiny@v2_10k:10": [
+        9,
+        10
+      ],
+      "tiny@v2_20k:10": [
+        8,
+        10
+      ],
+      "tiny@v2_30k:10": [
+        10,
+        10
+      ]
+    }
+  },
+  "paired": {
+    "tiny@v1:10 vs tiny@v2_10k:10": {
+      "arm_a": "tiny@v1:10",
+      "arm_b": "tiny@v2_10k:10",
+      "table": {
+        "both_succeed": 68,
+        "only_a": 3,
+        "only_b": 22,
+        "both_fail": 7
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.00015652179718017578
+    },
+    "tiny@v1:10 vs tiny@v2_20k:10": {
+      "arm_a": "tiny@v1:10",
+      "arm_b": "tiny@v2_20k:10",
+      "table": {
+        "both_succeed": 68,
+        "only_a": 3,
+        "only_b": 17,
+        "both_fail": 12
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.0025768280029296875
+    },
+    "tiny@v1:10 vs tiny@v2_30k:10": {
+      "arm_a": "tiny@v1:10",
+      "arm_b": "tiny@v2_30k:10",
+      "table": {
+        "both_succeed": 66,
+        "only_a": 5,
+        "only_b": 22,
+        "both_fail": 7
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.0015137195587158203
+    },
+    "tiny@v2_10k:10 vs tiny@v2_20k:10": {
+      "arm_a": "tiny@v2_10k:10",
+      "arm_b": "tiny@v2_20k:10",
+      "table": {
+        "both_succeed": 82,
+        "only_a": 8,
+        "only_b": 3,
+        "both_fail": 7
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.2265625
+    },
+    "tiny@v2_10k:10 vs tiny@v2_30k:10": {
+      "arm_a": "tiny@v2_10k:10",
+      "arm_b": "tiny@v2_30k:10",
+      "table": {
+        "both_succeed": 83,
+        "only_a": 7,
+        "only_b": 5,
+        "both_fail": 5
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.7744140625
+    },
+    "tiny@v2_20k:10 vs tiny@v2_30k:10": {
+      "arm_a": "tiny@v2_20k:10",
+      "arm_b": "tiny@v2_30k:10",
+      "table": {
+        "both_succeed": 80,
+        "only_a": 5,
+        "only_b": 8,
+        "both_fail": 7
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.5810546875
+    }
+  },
+  "protocol": {
+    "version": 4,
+    "suite": "libero_spatial",
+    "replan": 5,
+    "env_seed": 7,
+    "max_episode_steps": 220,
+    "num_steps_wait": 10,
+    "no_op_action": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      -1
+    ],
+    "observation_height": 256,
+    "observation_width": 256,
+    "fps": 20,
+    "init_state_selection": "episode index (0-based)",
+    "official_inits_per_task": 50,
+    "seed_scheme": "sha256(suite:task:init:chunk), first 4 bytes little-endian; CPU torch.Generator"
+  },
+  "init_indices": [
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19
+  ],
+  "external_sanity_anchor": {
+    "label": "openpi published; different checkpoint/framework; not paired",
+    "success_percent": {
+      "libero_spatial": 98.8,
+      "libero_object": 98.2,
+      "libero_goal": 98.0,
+      "libero_10": 92.4
+    }
+  },
+  "n_action_steps": [
+    5
+  ],
+  "checkpoint_n_action_steps": [
+    16
+  ],
+  "chunk_size": [
+    16
+  ],
+  "max_episode_steps": [
+    220
+  ],
+  "inits_requested": [
+    10
+  ]
+}
