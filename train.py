@@ -612,7 +612,7 @@ def update_ema(ema, model, decay):
             ema[name].lerp_(param.detach(), 1 - decay)
 
 
-def save_checkpoint(path, model, opt, phase, step, meta, settings, rng, head=None, ema=None):
+def save_checkpoint(path, model, opt, phase, step, meta, settings, rng, head=None, ema=None, muon=None):
     state = dict(config=asdict(model.config), model=model.state_dict(), opt=opt.state_dict(), phase=phase,
                  step=step, norm=meta["norm"], tokenizer=meta["tokenizer"], cache_fingerprint=meta["fingerprint"],
                  settings=settings, numpy_rng=rng.bit_generator.state, torch_rng=torch.get_rng_state(),
@@ -620,6 +620,8 @@ def save_checkpoint(path, model, opt, phase, step, meta, settings, rng, head=Non
                  head=head.state_dict() if head is not None else None)
     if ema is not None:
         state["ema"] = ema
+    if muon is not None:
+        state["muon"] = muon.state_dict()
     tmp = Path(path).with_suffix(".tmp")
     with tmp.open("wb") as f:
         torch.save(state, f)
@@ -628,9 +630,11 @@ def save_checkpoint(path, model, opt, phase, step, meta, settings, rng, head=Non
     tmp.replace(path)
 
 
-def restore_checkpoint(ckpt, model, opt, rng, head=None, ema=None):
+def restore_checkpoint(ckpt, model, opt, rng, head=None, ema=None, muon=None):
     model.load_state_dict(ckpt["model"])
     opt.load_state_dict(ckpt["opt"])
+    if muon is not None:
+        muon.load_state_dict(ckpt["muon"])
     rng.bit_generator.state = ckpt["numpy_rng"]
     torch.set_rng_state(ckpt["torch_rng"])
     if ckpt["cuda_rng"] is not None:
@@ -739,6 +743,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--distill-batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--optimizer", choices=("adamw", "muon"), default="adamw")
     parser.add_argument("--ema", type=float, help="EMA decay in [0, 1); disabled by default")
     parser.add_argument("--save-every", type=int, default=0, help="numbered action-training snapshots; 0 disables")
     parser.add_argument("--color-jitter", action="store_true", help="small per-sample brightness/contrast augmentation")
@@ -769,19 +774,27 @@ def main():
     device = torch.device(args.device)
     data = Batches(args.cache, args.horizon, args.seed)
     c = Config(image_size=data.meta["image_size"], num_cameras=2, vocab_size=len(data.meta["tokenizer"]["vocab"]), horizon=args.horizon, state_dim=8, action_dim=7)
-    settings = {k: getattr(args, k) for k in ("steps", "distill_steps", "batch_size", "distill_batch_size", "lr", "seed", "ema", "color_jitter")}
+    settings = {k: getattr(args, k) for k in ("steps", "distill_steps", "batch_size", "distill_batch_size", "lr", "seed", "ema", "color_jitter", "optimizer")}
     path = args.runs / "latest.pt"
     ckpt = torch.load(path, map_location="cpu", weights_only=True) if args.resume and path.exists() else None
     if args.resume and ckpt is None:
         raise FileNotFoundError(f"No checkpoint to resume: {path}")
     if path.exists() and not args.resume:
         raise ValueError("Checkpoint exists; use --resume or another --runs")
-    if ckpt and (ckpt["config"] != asdict(c) or {"ema": None, "color_jitter": False, **ckpt["settings"]} != settings or ckpt["cache_fingerprint"] != data.meta["fingerprint"]):
+    if ckpt and (ckpt["config"] != asdict(c) or {"ema": None, "color_jitter": False, "optimizer": "adamw", **ckpt["settings"]} != settings or ckpt["cache_fingerprint"] != data.meta["fingerprint"]):
         raise ValueError("Resume configuration/cache differs from checkpoint")
     args.runs.mkdir(parents=True, exist_ok=True)
     model = MicroVLA(c).to(device)
+    # Only block-internal matrices: attention, MLPs and adaptive norm modulation.
+    # Embeddings and boundary projections (including vision.project) stay AdamW.
+    muon_params = [p for name, p in model.named_parameters() if args.optimizer == "muon"
+                   and p.requires_grad and p.ndim == 2 and name.startswith(("layers.", "vision.blocks."))]
+    muon_ids = {id(p) for p in muon_params}
+    adamw_params = [p for p in model.parameters() if id(p) not in muon_ids]
     ema = {k: v.detach().clone() for k, v in model.state_dict().items()} if args.ema is not None else None
     print(json.dumps(dict(parameters=parameter_counts(model), cache_bytes=data.meta["cache_bytes"],
+                          optimizer_parameters=dict(adamw=sum(p.numel() for p in adamw_params),
+                                                    muon=sum(p.numel() for p in muon_params)),
                           estimated_hours=(args.steps / 1.2 + args.distill_steps / 1.0) / 3600,
                           estimate="unmeasured 3050 heuristic; measured ETA follows after 50 steps")), flush=True)
     writer = make_logger(args, settings, c, args.runs / "tb")
@@ -798,10 +811,14 @@ def main():
                 params = [*model.vision.parameters(), *head.parameters()]
             else:
                 params = list(model.parameters())
-            opt = torch.optim.AdamW(params, lr=args.lr if phase == "train" else 1e-3, weight_decay=.01)
+            opt = torch.optim.AdamW(adamw_params if phase == "train" else params,
+                                    lr=args.lr if phase == "train" else 1e-3, weight_decay=.01)
+            muon = torch.optim.Muon(muon_params, lr=args.lr, momentum=.95, nesterov=True, ns_steps=5,
+                                    weight_decay=.01, adjust_lr_fn="match_rms_adamw") if phase == "train" and args.optimizer == "muon" else None
+            optimizers = (opt,) if muon is None else (opt, muon)
             first = 1
             if ckpt and ckpt["phase"] == phase:
-                first = restore_checkpoint(ckpt, model, opt, data.rng, head, ema)
+                first = restore_checkpoint(ckpt, model, opt, data.rng, head, ema, muon)
                 ckpt = None
             if phase == "train" and args.compile:
                 from torch._inductor import config as inductor_config
@@ -822,7 +839,8 @@ def main():
                         x = F.interpolate(images.float().div(127.5).sub(1), size=c.image_size * 2, mode="bilinear", align_corners=False)
                         target = teacher(pixel_values=x.to(next(teacher.parameters()).dtype), interpolate_pos_encoding=True).last_hidden_state.float()
                         target = F.layer_norm(target, target.shape[-1:])
-                opt.zero_grad(set_to_none=True)
+                for optimizer in optimizers:
+                    optimizer.zero_grad(set_to_none=True)
                 with autocast(device):
                     if phase == "train":
                         loss = model.loss(images, state, instr, actions)
@@ -832,9 +850,10 @@ def main():
                 loss.backward()
                 nn.utils.clip_grad_norm_(params, 1.)
                 lr = (args.lr if phase == "train" else 1e-3) * min(step / 100, 1) * (.1 + .9 * .5 * (1 + math.cos(math.pi * step / total)))
-                for group in opt.param_groups:
-                    group["lr"] = lr
-                opt.step()
+                for optimizer in optimizers:
+                    for group in optimizer.param_groups:
+                        group["lr"] = lr
+                    optimizer.step()
                 if ema is not None:
                     update_ema(ema, model, args.ema)
                 if step % 50 == 0 or step == total:
@@ -855,9 +874,9 @@ def main():
                         writer.add_scalar("val/loss", val, step)
                         print(json.dumps(dict(step=step, val_loss=val)), flush=True)
                     if snapshot:
-                        save_checkpoint(args.runs / f"step_{step}.pt", model, opt, phase, step, data.meta, settings, data.rng, head, ema)
-                    save_checkpoint(path, model, opt, phase, step, data.meta, settings, data.rng, head, ema)
-            del teacher, head, opt, params
+                        save_checkpoint(args.runs / f"step_{step}.pt", model, opt, phase, step, data.meta, settings, data.rng, head, ema, muon)
+                    save_checkpoint(path, model, opt, phase, step, data.meta, settings, data.rng, head, ema, muon)
+            del teacher, head, opt, muon, optimizers, params
             if device.type == "cuda":
                 torch.cuda.empty_cache()
     finally:

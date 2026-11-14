@@ -1,5 +1,6 @@
 import io
 import json
+import math
 import shutil
 from dataclasses import asdict
 from pathlib import Path
@@ -663,6 +664,7 @@ def test_cli_cpu_training_and_resume(source, tmp_path, monkeypatch, extras, logg
     tl.main()
     saved = torch.load(runs / "latest.pt", weights_only=True)
     assert saved["step"] == 2 and saved["phase"] == "train"
+    assert saved["settings"]["optimizer"] == "adamw" and "muon" not in saved
     if logger == "wandb":
         assert fake_wandb.runs[0].kwargs["config"] == {**saved["settings"], "model_config": saved["config"]}
     assert (runs / "tb").exists() == (logger is None)
@@ -679,12 +681,16 @@ def test_cli_cpu_training_and_resume(source, tmp_path, monkeypatch, extras, logg
     else:
         assert "ema" not in saved and not list(runs.glob("step_*.pt"))
         # Legacy settings (before these flags existed) still resume with defaults.
-        for key in ("ema", "color_jitter"):
+        for key in ("ema", "color_jitter", "optimizer"):
             saved["settings"].pop(key)
         torch.save(saved, runs / "latest.pt")
     before = (runs / "latest.pt").read_bytes()
     monkeypatch.setattr("sys.argv", [*command, "--resume"])
     tl.main()
+    assert (runs / "latest.pt").read_bytes() == before
+    monkeypatch.setattr("sys.argv", [*command, "--resume", "--optimizer", "muon"])
+    with pytest.raises(ValueError, match="Resume configuration/cache differs"):
+        tl.main()
     assert (runs / "latest.pt").read_bytes() == before
     if logger == "wandb":
         first, resumed = fake_wandb.runs
@@ -696,9 +702,10 @@ def test_cli_cpu_training_and_resume(source, tmp_path, monkeypatch, extras, logg
         assert not fake_wandb.runs
 
 
+@pytest.mark.parametrize("optimizer", ["adamw", "muon"])
 @pytest.mark.parametrize("ema", [False, True])
 @pytest.mark.parametrize("interrupted_phase", ["distill", "train"])
-def test_offline_distillation_resumes_into_training_exactly(source, tmp_path, monkeypatch, ema, interrupted_phase):
+def test_offline_distillation_resumes_into_training_exactly(source, tmp_path, monkeypatch, ema, interrupted_phase, optimizer):
     import transformers
     build(source)
     class Teacher(torch.nn.Module):
@@ -718,7 +725,8 @@ def test_offline_distillation_resumes_into_training_exactly(source, tmp_path, mo
     original_config = tl.Config
     monkeypatch.setattr(tl, "Config", lambda **kw: original_config(**{**asdict(config()), **kw}))
     base = ["train.py", "--cache", str(source[1]), "--device", "cpu", "--steps", "3", "--save-every", "2",
-            "--distill-steps", "2", "--batch-size", "2", "--distill-batch-size", "2", "--horizon", "4"]
+            "--distill-steps", "2", "--batch-size", "2", "--distill-batch-size", "2", "--horizon", "4",
+            "--optimizer", optimizer]
     if ema:
         base += ["--ema", ".9", "--color-jitter"]
     uninterrupted, resumed = tmp_path / "full", tmp_path / "resumed"
@@ -736,13 +744,99 @@ def test_offline_distillation_resumes_into_training_exactly(source, tmp_path, mo
     checkpoint = torch.load(resumed / "latest.pt", weights_only=True)
     assert checkpoint["phase"] == interrupted_phase and checkpoint["step"] == 2
     assert bool(checkpoint["head"]) == (interrupted_phase == "distill")
+    assert ("muon" in checkpoint) == (optimizer == "muon" and interrupted_phase == "train")
     monkeypatch.setattr(tl, "save_checkpoint", original_save)
     monkeypatch.setattr("sys.argv", [*base, "--runs", str(resumed), "--resume"])
     tl.main()
     a = torch.load(uninterrupted / "latest.pt", weights_only=True)
     b = torch.load(resumed / "latest.pt", weights_only=True)
     assert a["phase"] == b["phase"] == "train" and a["step"] == b["step"] == 3
+    torch.testing.assert_close(a["opt"], b["opt"], atol=0, rtol=0)
+    if optimizer == "muon":
+        assert a["muon"]["state"] and a["opt"]["state"]
+        assert a["muon"]["param_groups"] == b["muon"]["param_groups"]
+        torch.testing.assert_close(a["muon"]["state"], b["muon"]["state"], atol=0, rtol=0)
     for key in a["model"]:
         torch.testing.assert_close(a["model"][key], b["model"][key], atol=0, rtol=0)
         if ema:
             torch.testing.assert_close(a["ema"][key], b["ema"][key], atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("optimizer", [None, "muon"])
+def test_flow_optimizer_split_schedule_and_cpu_step(source, tmp_path, monkeypatch, capsys, optimizer):
+    meta = build(source)
+    c = config()
+    c.vocab_size = len(meta["tokenizer"]["vocab"])
+    monkeypatch.setattr(tl, "Config", lambda **kw: Config(**{**asdict(c), **kw}))
+    created, steps = [], []
+    for kind in ("AdamW", "Muon"):
+        original = getattr(torch.optim, kind)
+        def tracked(*args, _kind=kind, _original=original, **kwargs):
+            opt = _original(*args, **kwargs)
+            created.append((_kind, opt))
+            step = opt.step
+            def tracked_step():
+                steps.append((_kind, [g["lr"] for g in opt.param_groups]))
+                return step()
+            opt.step = tracked_step
+            return opt
+        monkeypatch.setattr(torch.optim, kind, tracked)
+    models = []
+    original_model = tl.MicroVLA
+    monkeypatch.setattr(tl, "MicroVLA", lambda c: models.append(original_model(c)) or models[-1])
+    runs = tmp_path / "training"
+    total = 101 if optimizer == "muon" else 2
+    command = ["train.py", "--cache", str(source[1]), "--runs", str(runs), "--device", "cpu",
+               "--steps", str(total), "--distill-steps", "0", "--batch-size", "2", "--horizon", "4", "--logger", "none"]
+    monkeypatch.setattr("sys.argv", command + (["--optimizer", optimizer] if optimizer else []))
+    tl.main()
+    model, = models
+    names = {id(p): n for n, p in model.named_parameters() if p.requires_grad}
+    groups = {kind: [p for g in opt.param_groups for p in g["params"]] for kind, opt in created}
+    ids = [id(p) for params in groups.values() for p in params]
+    assert len(ids) == len(set(ids)) and set(ids) == set(names)
+    if optimizer == "muon":
+        expected = {f"layers.{i}.{expert}.{weight}" for i in range(c.depth) for expert in ("prefix", "action")
+                    for weight in ("qkv.weight", "out.weight", "ffn.up.weight", "ffn.down.weight")}
+        expected |= {f"layers.{i}.action.{norm}.modulation.weight" for i in range(c.depth)
+                     for norm in ("attn_norm", "ffn_norm")}
+        expected |= {f"vision.blocks.{i}.{weight}" for i in range(c.vit_depth)
+                     for weight in ("self_attn.in_proj_weight", "self_attn.out_proj.weight", "linear1.weight", "linear2.weight")}
+        assert {names[id(p)] for p in groups["Muon"]} == expected
+        assert all(p.ndim == 2 for p in groups["Muon"])
+        defaults = created[1][1].defaults
+        assert defaults["adjust_lr_fn"] == "match_rms_adamw" and defaults["weight_decay"] == .01
+        assert defaults["momentum"] == .95 and defaults["nesterov"] and defaults["ns_steps"] == 5
+    else:
+        assert list(groups) == ["AdamW"]
+        assert [id(p) for p in groups["AdamW"]] == list(names)
+    defaults = created[0][1].defaults
+    assert defaults["lr"] == 3e-4 and defaults["weight_decay"] == .01 and defaults["betas"] == (.9, .999)
+    assert len(steps) == total * len(created)
+    for i, (_, lrs) in enumerate(steps):
+        step = i // len(created) + 1
+        assert lrs == pytest.approx([3e-4 * min(step / 100, 1) * (.1 + .9 * .5 * (1 + math.cos(math.pi * step / total)))])
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    counts = next(r["optimizer_parameters"] for r in rows if "optimizer_parameters" in r)
+    assert counts == {kind.lower(): sum(p.numel() for p in groups.get(kind, [])) for kind in ("AdamW", "Muon")}
+    assert next(r["steps_per_s"] for r in rows if "steps_per_s" in r) > 0
+    saved = torch.load(runs / "latest.pt", weights_only=True)
+    assert all(torch.isfinite(p).all() for p in saved["model"].values())
+    if optimizer is None:
+        # Numerically reproduce the original single-AdamW loop, including RNG/order.
+        torch.manual_seed(0)
+        reference = MicroVLA(c)
+        opt = torch.optim.AdamW(reference.parameters(), lr=3e-4, weight_decay=.01)
+        data = tl.Batches(source[1], 4, 0)
+        for step in (1, 2):
+            images, state, instr, actions = data.batch(2, torch.device("cpu"))
+            opt.zero_grad(set_to_none=True)
+            reference.loss(tl.augment(images), state, instr, actions).backward()
+            torch.nn.utils.clip_grad_norm_(reference.parameters(), 1.)
+            opt.param_groups[0]["lr"] = 3e-4 * min(step / 100, 1) * (.1 + .9 * .5 * (1 + math.cos(math.pi * step / 2)))
+            opt.step()
+        torch.testing.assert_close(saved["model"], reference.state_dict(), atol=0, rtol=0)
+    else:
+        monkeypatch.setattr("sys.argv", [*command, "--resume", "--optimizer", "adamw"])
+        with pytest.raises(ValueError, match="Resume configuration/cache differs"):
+            tl.main()
