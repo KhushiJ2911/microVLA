@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from bench import eval_libero as ev
-from bench import train_libero as tl
+import train as tl
 from train import Config, MicroVLA
 
 
@@ -339,7 +339,7 @@ def test_stream_cli_defaults_to_separate_cache(monkeypatch):
         calls.append((args, kwargs))
         return dict(frames=24, cache_bytes=1, image_size=128, val_episodes=[])
     monkeypatch.setattr(tl, "preprocess", preprocess)
-    monkeypatch.setattr("sys.argv", ["train_libero.py", "--preprocess", "--stream", "--image-size", "128"])
+    monkeypatch.setattr("sys.argv", ["train.py", "--preprocess", "--stream", "--image-size", "128"])
     tl.main()
     assert calls == [((tl.DATASET, Path("runs/libero_cache_128"), 128), dict(seed=0, stream=True))]
 
@@ -654,7 +654,7 @@ def test_cli_cpu_training_and_resume(source, tmp_path, monkeypatch, extras, logg
     runs = tmp_path / "training"
     original = tl.Config
     monkeypatch.setattr(tl, "Config", lambda **kw: original(**{**asdict(config()), **kw}))
-    command = ["train_libero.py", "--cache", str(source[1]), "--runs", str(runs), "--device", "cpu",
+    command = ["train.py", "--cache", str(source[1]), "--runs", str(runs), "--device", "cpu",
                "--steps", "2", "--distill-steps", "0", "--batch-size", "2", "--horizon", "4"]
     command += extras
     if logger:
@@ -717,7 +717,7 @@ def test_offline_distillation_resumes_into_training_exactly(source, tmp_path, mo
     monkeypatch.setattr(transformers, "SiglipVisionModel", Teacher)
     original_config = tl.Config
     monkeypatch.setattr(tl, "Config", lambda **kw: original_config(**{**asdict(config()), **kw}))
-    base = ["train_libero.py", "--cache", str(source[1]), "--device", "cpu", "--steps", "3", "--save-every", "2",
+    base = ["train.py", "--cache", str(source[1]), "--device", "cpu", "--steps", "3", "--save-every", "2",
             "--distill-steps", "2", "--batch-size", "2", "--distill-batch-size", "2", "--horizon", "4"]
     if ema:
         base += ["--ema", ".9", "--color-jitter"]

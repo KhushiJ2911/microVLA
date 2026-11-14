@@ -38,8 +38,8 @@ Train the small model on LIBERO-Spatial and evaluate it:
 uv run python -c "from libero.libero import benchmark"      # one-time LIBERO config (answer N)
 uv run hf download lerobot/libero-assets --repo-type dataset --local-dir ~/.cache/libero/assets
 uv run hf download google/siglip-base-patch16-224             # distillation teacher
-uv run python -m bench.train_libero --preprocess --stream --cache runs/libero_cache   # 96 px, one parquet at a time
-uv run python -m bench.train_libero --compile --cache runs/libero_cache               # distill, then flow matching
+uv run python train.py --preprocess --stream --cache runs/libero_cache   # 96 px, one parquet at a time
+uv run python train.py --compile --cache runs/libero_cache               # distill, then flow matching
 uv run python -m bench.eval_libero --suite libero_spatial --inits 10 --tag mine --arms tiny:10
 ```
 
@@ -67,7 +67,7 @@ Useful flags:
 | `--inits`, `--init-start` | which LIBERO initial states (0-49) to run |
 | `--suite` | `libero_spatial`, `libero_object`, `libero_goal`, `libero_10` |
 
-[sim.py](sim.py) and `train.py` also contain a toy 2D pick-and-place task (`uv run python train.py --compile`) that I
+[examples/sim.py](examples/sim.py) and `examples/train_toy.py` also contain a toy 2D pick-and-place task (`uv run python -m examples.train_toy --compile`) that I
 used to debug the model before moving to LIBERO.
 
 ## Details
@@ -82,7 +82,7 @@ $$
 
 At inference the model starts from noise and takes 10 (or 5) Euler steps along $v_\theta$ to get the actions.
 
-The small model ([train.py](train.py), LIBERO data and training in [train_libero.py](train_libero.py)):
+The small model (model, LIBERO data and training are all in [train.py](train.py)):
 
 | Part | Size |
 |---|---|

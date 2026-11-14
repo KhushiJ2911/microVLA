@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-import train
+from examples import train_toy as train
 from train import Config, MicroVLA, attention_mask, parameter_counts
 
 
@@ -144,13 +144,13 @@ def test_default_parameter_count():
 
 @pytest.mark.parametrize("logger", [None, "wandb", "none"])
 def test_cli_cpu_training_and_resume(tmp_path, monkeypatch, logger, fake_wandb):
-    import sim
+    from examples import sim
     monkeypatch.chdir(tmp_path)
     original = train.Config
     monkeypatch.setattr(train, "Config", lambda **kwargs: original(**{**vars(tiny_config()), **kwargs}))
     monkeypatch.setattr(sim, "evaluate", lambda *args, **kwargs: {"success": .5})
     runs, logdir = tmp_path / "training", tmp_path / "tb"
-    command = ["train.py", "--runs", str(runs), "--logdir", str(logdir), "--device", "cpu",
+    command = ["examples.train_toy", "--runs", str(runs), "--logdir", str(logdir), "--device", "cpu",
                "--steps", "2", "--episodes", "2", "--distill-steps", "0", "--batch-size", "2",
                "--flow-steps", "1"]
     if logger:

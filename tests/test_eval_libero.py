@@ -592,7 +592,7 @@ def test_reference_pass_resumes_per_arm_and_combines_summary(tmp_path, monkeypat
 
 def test_tiny_uses_same_rollout_seed_wait_queue_and_env_action_format(cpu_rollout):
     from dataclasses import asdict
-    from bench.train_libero import TinyPolicy, IdentityProcessor, tokenizer
+    from train import TinyPolicy, IdentityProcessor, tokenizer
     env, _, _, _, env_pre, env_post = cpu_rollout
     original_obs = env.obs
     def obs():
@@ -631,7 +631,7 @@ def test_tiny_uses_same_rollout_seed_wait_queue_and_env_action_format(cpu_rollou
 def test_main_tiny_checkpoint_identity_resume_and_changed_hash(cpu_rollout, tmp_path, monkeypatch, suite, ablation):
     from dataclasses import asdict
     import hashlib
-    from bench import train_libero as tl
+    import train as tl
     import lerobot.envs.factory as factory
     env, *_ = cpu_rollout
     if suite != "libero_spatial":
@@ -742,7 +742,7 @@ def test_init_range_tag_paths_resume_and_pairing(tmp_path, monkeypatch, start, c
 
 def test_named_checkpoints_paired_workers_identity_and_resume(tmp_path, monkeypatch):
     import hashlib
-    from bench import train_libero as tl
+    import train as tl
     import lerobot.envs.factory as factory
     monkeypatch.chdir(tmp_path)
     paths = {name: tmp_path / f"{name}.pt" for name in ("v1", "v2")}

@@ -269,7 +269,7 @@ def main():
     is_tiny = base == "tiny" or base.startswith("tiny-")
     if is_tiny:
         import torch
-        from bench.train_libero import TinyPolicy, IdentityProcessor
+        from train import TinyPolicy, IdentityProcessor
         digest = hashlib.sha256()
         checkpoint_path = checkpoints[checkpoint_name]
         with checkpoint_path.open("rb") as f:

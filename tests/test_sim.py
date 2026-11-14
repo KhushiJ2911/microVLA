@@ -2,7 +2,7 @@ import torch
 import pytest
 from PIL import Image
 
-import sim
+from examples import sim
 
 
 @pytest.fixture(scope="module", autouse=True)
