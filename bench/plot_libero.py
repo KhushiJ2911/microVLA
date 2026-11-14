@@ -7,7 +7,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from eval_libero import MAX_STEPS, summarize, wilson
+from bench.eval_libero import MAX_STEPS, summarize, wilson
 
 COLORS = {"nf4+trim:10": "#4477AA", "nf4+trim:5": "#EE6677", "offload-3.5:10": "#228833"}
 SUITES = {"libero_spatial": "Spatial", "libero_object": "Object", "libero_goal": "Goal", "libero_10": "LIBERO-10"}

@@ -9,8 +9,8 @@ import sys
 from PIL import Image
 import pytest
 
-import plot_libero as plotter
-from eval_libero import normalize
+from bench import plot_libero as plotter
+from bench.eval_libero import normalize
 
 ROOT = Path(__file__).resolve().parents[1]
 ARMS = [*plotter.COLORS, "tiny:10", "tiny-blind:10", "tiny-no-wrist:10", "tiny-wrong-text:10", "tiny-no-state:10"]
@@ -84,7 +84,8 @@ def test_render_synthetic_arms(sample, tmp_path, monkeypatch, n_arms):
 
 def test_cli_copied_sample(sample, tmp_path):
     original = sample.read_bytes()
-    result = subprocess.run([sys.executable, str(ROOT / "plot_libero.py"), "--suite", "libero_spatial"],
+    shutil.copytree(ROOT / "bench", tmp_path / "bench")
+    result = subprocess.run([sys.executable, "-m", "bench.plot_libero", "--suite", "libero_spatial"],
                             cwd=tmp_path, env={**os.environ, "PYTHONPATH": ""},
                             capture_output=True, text=True, check=True)
     assert "assets/libero_results.png" in result.stdout
@@ -174,7 +175,8 @@ def test_all_suites(all_suites, tmp_path, monkeypatch, missing):
 
 
 def test_all_cli(all_suites, tmp_path):
-    result = subprocess.run([sys.executable, str(ROOT / "plot_libero.py"), "--all"],
+    shutil.copytree(ROOT / "bench", tmp_path / "bench")
+    result = subprocess.run([sys.executable, "-m", "bench.plot_libero", "--all"],
                             cwd=tmp_path, env={**os.environ, "PYTHONPATH": ""},
                             capture_output=True, text=True, check=True)
     assert "assets/libero_suites.png" in result.stdout

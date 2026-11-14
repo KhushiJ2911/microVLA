@@ -38,9 +38,9 @@ Train the small model on LIBERO-Spatial and evaluate it:
 uv run python -c "from libero.libero import benchmark"      # one-time LIBERO config (answer N)
 uv run hf download lerobot/libero-assets --repo-type dataset --local-dir ~/.cache/libero/assets
 uv run hf download google/siglip-base-patch16-224             # distillation teacher
-uv run python train_libero.py --preprocess --stream --cache runs/libero_cache   # 96 px, one parquet at a time
-uv run python train_libero.py --compile --cache runs/libero_cache               # distill, then flow matching
-uv run python eval_libero.py --suite libero_spatial --inits 10 --tag mine --arms tiny:10
+uv run python -m bench.train_libero --preprocess --stream --cache runs/libero_cache   # 96 px, one parquet at a time
+uv run python -m bench.train_libero --compile --cache runs/libero_cache               # distill, then flow matching
+uv run python -m bench.eval_libero --suite libero_spatial --inits 10 --tag mine --arms tiny:10
 ```
 
 Run pretrained pi0.5 (needs access to the gated [PaliGemma](https://huggingface.co/google/paligemma-3b-pt-224)
@@ -52,7 +52,7 @@ uv run hf download lerobot/pi05_libero_finetuned_v044 --revision 7152f13e34c6c11
 uv run hf download google/paligemma-3b-pt-224 --include 'tokenizer*' 'special_tokens_map.json'
 uv run hf download HuggingFaceVLA/libero --repo-type dataset --include meta/tasks.parquet data/chunk-000/file-000.parquet
 uv run python infer.py --config nf4+trim --steps 5            # latency / VRAM on cached frames
-uv run python eval_libero.py --suite libero_spatial --inits 10 --tag mine --arms nf4+trim:5
+uv run python -m bench.eval_libero --suite libero_spatial --inits 10 --tag mine --arms nf4+trim:5
 ```
 
 Useful flags:

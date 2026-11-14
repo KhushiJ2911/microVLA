@@ -12,8 +12,8 @@ import pyarrow.parquet as pq
 import pytest
 import torch
 
-import eval_libero as ev
-import train_libero as tl
+from bench import eval_libero as ev
+from bench import train_libero as tl
 from train import Config, MicroVLA
 
 

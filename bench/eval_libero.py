@@ -257,7 +257,7 @@ def main():
     for arm in args.arms: groups[arm.split(":")[0]].append(arm)
     if len(groups) > 1:
         for arms in groups.values():
-            result = subprocess.run([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:], "--arms", *arms])
+            result = subprocess.run([sys.executable, "-m", "bench.eval_libero", *sys.argv[1:], "--arms", *arms])
             if result.returncode: raise SystemExit(result.returncode)
         return
     import infer
@@ -269,7 +269,7 @@ def main():
     is_tiny = base == "tiny" or base.startswith("tiny-")
     if is_tiny:
         import torch
-        from train_libero import TinyPolicy, IdentityProcessor
+        from bench.train_libero import TinyPolicy, IdentityProcessor
         digest = hashlib.sha256()
         checkpoint_path = checkpoints[checkpoint_name]
         with checkpoint_path.open("rb") as f:
