@@ -1,5 +1,33 @@
 {
   "arms": {
+    "tiny@muon_10k:10": {
+      "episodes": 100,
+      "successes": 94,
+      "rate": 0.94,
+      "wilson95": [
+        0.8752318455410406,
+        0.9722138760368118
+      ],
+      "model_identity": {
+        "checkpoint_path": "/home/keyu/Documents/ChatGPT/Mujuco/.worktrees/infer/runs/libero_muon/step_10000.pt",
+        "checkpoint_sha256": "ce14b3159f45d009a28663031ea8cdc648b3ccef4976542e944844b862e0a5c5"
+      },
+      "mean_policy_latency_s": 0.07014141924629297
+    },
+    "tiny@muon_5k:10": {
+      "episodes": 100,
+      "successes": 92,
+      "rate": 0.92,
+      "wilson95": [
+        0.8500189229905127,
+        0.9589065385156194
+      ],
+      "model_identity": {
+        "checkpoint_path": "/home/keyu/Documents/ChatGPT/Mujuco/.worktrees/infer/runs/libero_muon/step_5000.pt",
+        "checkpoint_sha256": "7092ab70c7a9ab439ea540f5408cd601da7544c7470daab4e12f4142210b654b"
+      },
+      "mean_policy_latency_s": 0.06684942766052257
+    },
     "tiny@v1:10": {
       "episodes": 100,
       "successes": 71,
@@ -88,6 +116,14 @@
   "per_task": {
     "0": {
       "task_text": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+      "tiny@muon_10k:10": [
+        10,
+        10
+      ],
+      "tiny@muon_5k:10": [
+        10,
+        10
+      ],
       "tiny@v1:10": [
         9,
         10
@@ -115,6 +151,14 @@
     },
     "1": {
       "task_text": "pick up the black bowl next to the ramekin and place it on the plate",
+      "tiny@muon_10k:10": [
+        10,
+        10
+      ],
+      "tiny@muon_5k:10": [
+        10,
+        10
+      ],
       "tiny@v1:10": [
         9,
         10
@@ -142,6 +186,14 @@
     },
     "2": {
       "task_text": "pick up the black bowl from table center and place it on the plate",
+      "tiny@muon_10k:10": [
+        10,
+        10
+      ],
+      "tiny@muon_5k:10": [
+        10,
+        10
+      ],
       "tiny@v1:10": [
         9,
         10
@@ -169,6 +221,14 @@
     },
     "3": {
       "task_text": "pick up the black bowl on the cookie box and place it on the plate",
+      "tiny@muon_10k:10": [
+        10,
+        10
+      ],
+      "tiny@muon_5k:10": [
+        9,
+        10
+      ],
       "tiny@v1:10": [
         7,
         10
@@ -196,6 +256,14 @@
     },
     "4": {
       "task_text": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "tiny@muon_10k:10": [
+        9,
+        10
+      ],
+      "tiny@muon_5k:10": [
+        9,
+        10
+      ],
       "tiny@v1:10": [
         3,
         10
@@ -223,6 +291,14 @@
     },
     "5": {
       "task_text": "pick up the black bowl on the ramekin and place it on the plate",
+      "tiny@muon_10k:10": [
+        7,
+        10
+      ],
+      "tiny@muon_5k:10": [
+        5,
+        10
+      ],
       "tiny@v1:10": [
         1,
         10
@@ -250,6 +326,14 @@
     },
     "6": {
       "task_text": "pick up the black bowl next to the cookie box and place it on the plate",
+      "tiny@muon_10k:10": [
+        10,
+        10
+      ],
+      "tiny@muon_5k:10": [
+        10,
+        10
+      ],
       "tiny@v1:10": [
         10,
         10
@@ -277,6 +361,14 @@
     },
     "7": {
       "task_text": "pick up the black bowl on the stove and place it on the plate",
+      "tiny@muon_10k:10": [
+        10,
+        10
+      ],
+      "tiny@muon_5k:10": [
+        9,
+        10
+      ],
       "tiny@v1:10": [
         9,
         10
@@ -304,6 +396,14 @@
     },
     "8": {
       "task_text": "pick up the black bowl next to the plate and place it on the plate",
+      "tiny@muon_10k:10": [
+        9,
+        10
+      ],
+      "tiny@muon_5k:10": [
+        10,
+        10
+      ],
       "tiny@v1:10": [
         7,
         10
@@ -331,6 +431,14 @@
     },
     "9": {
       "task_text": "pick up the black bowl on the wooden cabinet and place it on the plate",
+      "tiny@muon_10k:10": [
+        9,
+        10
+      ],
+      "tiny@muon_5k:10": [
+        10,
+        10
+      ],
       "tiny@v1:10": [
         7,
         10
@@ -358,6 +466,175 @@
     }
   },
   "paired": {
+    "tiny@muon_10k:10 vs tiny@muon_5k:10": {
+      "arm_a": "tiny@muon_10k:10",
+      "arm_b": "tiny@muon_5k:10",
+      "table": {
+        "both_succeed": 90,
+        "only_a": 4,
+        "only_b": 2,
+        "both_fail": 4
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.6875
+    },
+    "tiny@muon_10k:10 vs tiny@v1:10": {
+      "arm_a": "tiny@muon_10k:10",
+      "arm_b": "tiny@v1:10",
+      "table": {
+        "both_succeed": 70,
+        "only_a": 24,
+        "only_b": 1,
+        "both_fail": 5
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.5497207641601562e-06
+    },
+    "tiny@muon_10k:10 vs tiny@v2_10k:10": {
+      "arm_a": "tiny@muon_10k:10",
+      "arm_b": "tiny@v2_10k:10",
+      "table": {
+        "both_succeed": 88,
+        "only_a": 6,
+        "only_b": 2,
+        "both_fail": 4
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.2890625
+    },
+    "tiny@muon_10k:10 vs tiny@v2_20k:10": {
+      "arm_a": "tiny@muon_10k:10",
+      "arm_b": "tiny@v2_20k:10",
+      "table": {
+        "both_succeed": 82,
+        "only_a": 12,
+        "only_b": 3,
+        "both_fail": 3
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.03515625
+    },
+    "tiny@muon_10k:10 vs tiny@v2_30k:10": {
+      "arm_a": "tiny@muon_10k:10",
+      "arm_b": "tiny@v2_30k:10",
+      "table": {
+        "both_succeed": 85,
+        "only_a": 9,
+        "only_b": 3,
+        "both_fail": 3
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.14599609375
+    },
+    "tiny@muon_10k:10 vs tiny@v3_10k:10": {
+      "arm_a": "tiny@muon_10k:10",
+      "arm_b": "tiny@v3_10k:10",
+      "table": {
+        "both_succeed": 88,
+        "only_a": 6,
+        "only_b": 3,
+        "both_fail": 3
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.5078125
+    },
+    "tiny@muon_10k:10 vs tiny@v3_5k:10": {
+      "arm_a": "tiny@muon_10k:10",
+      "arm_b": "tiny@v3_5k:10",
+      "table": {
+        "both_succeed": 82,
+        "only_a": 12,
+        "only_b": 3,
+        "both_fail": 3
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.03515625
+    },
+    "tiny@muon_5k:10 vs tiny@v1:10": {
+      "arm_a": "tiny@muon_5k:10",
+      "arm_b": "tiny@v1:10",
+      "table": {
+        "both_succeed": 71,
+        "only_a": 21,
+        "only_b": 0,
+        "both_fail": 8
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 9.5367431640625e-07
+    },
+    "tiny@muon_5k:10 vs tiny@v2_10k:10": {
+      "arm_a": "tiny@muon_5k:10",
+      "arm_b": "tiny@v2_10k:10",
+      "table": {
+        "both_succeed": 88,
+        "only_a": 4,
+        "only_b": 2,
+        "both_fail": 6
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.6875
+    },
+    "tiny@muon_5k:10 vs tiny@v2_20k:10": {
+      "arm_a": "tiny@muon_5k:10",
+      "arm_b": "tiny@v2_20k:10",
+      "table": {
+        "both_succeed": 83,
+        "only_a": 9,
+        "only_b": 2,
+        "both_fail": 6
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.0654296875
+    },
+    "tiny@muon_5k:10 vs tiny@v2_30k:10": {
+      "arm_a": "tiny@muon_5k:10",
+      "arm_b": "tiny@v2_30k:10",
+      "table": {
+        "both_succeed": 84,
+        "only_a": 8,
+        "only_b": 4,
+        "both_fail": 4
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.3876953125
+    },
+    "tiny@muon_5k:10 vs tiny@v3_10k:10": {
+      "arm_a": "tiny@muon_5k:10",
+      "arm_b": "tiny@v3_10k:10",
+      "table": {
+        "both_succeed": 89,
+        "only_a": 3,
+        "only_b": 2,
+        "both_fail": 6
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 1.0
+    },
+    "tiny@muon_5k:10 vs tiny@v3_5k:10": {
+      "arm_a": "tiny@muon_5k:10",
+      "arm_b": "tiny@v3_5k:10",
+      "table": {
+        "both_succeed": 81,
+        "only_a": 11,
+        "only_b": 4,
+        "both_fail": 4
+      },
+      "complete_pairs": 100,
+      "incomplete_pairs": 0,
+      "mcnemar_exact_p": 0.11846923828125
+    },
     "tiny@v1:10 vs tiny@v2_10k:10": {
       "arm_a": "tiny@v1:10",
       "arm_b": "tiny@v2_10k:10",
